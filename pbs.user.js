@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.0
+// @version      0.3.1
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -564,12 +564,12 @@
             clientTasks.forEach(task => {
                 const row = document.createElement('div');
                 row.style.cssText = 'margin: 3px 0 6px 0; position: relative; cursor: pointer;';
-                if (task.hasNew) {
+                const isCompleted = Boolean(task.completed);
+                if (task.hasNew && !isCompleted) {
                     row.style.fontWeight = '700';
                 }
-
                 const titleLine = document.createElement('div');
-                titleLine.style.cssText = 'display: flex; align-items: baseline; gap: 4px;';
+                titleLine.style.cssText = 'display: flex; align-items: flex-start; gap: 4px;';
 
                 const starToggle = document.createElement('button');
                 const isStarred = starredIds.has(String(task.id || ''));
@@ -582,11 +582,12 @@
                     'border: 0',
                     'background: transparent',
                     'padding: 0',
-                    'color: #8a6900',
+                    'color: #f2c200',
                     'font-size: 15px',
-                    'line-height: 1',
+                    'line-height: 1.2',
                     'cursor: pointer',
-                    'flex: 0 0 auto'
+                    'flex: 0 0 15px',
+                    'width: 15px'
                 ].join(';');
                 starToggle.addEventListener('click', (event) => {
                     event.preventDefault();
@@ -600,6 +601,10 @@
                 link.href = taskUrl;
                 link.textContent = displayName;
                 link.style.cssText = 'color: #9f1607; text-decoration: none; min-width: 0; overflow-wrap: anywhere;';
+                if (isCompleted) {
+                    link.style.color = '#666';
+                    link.style.textDecoration = 'line-through';
+                }
 
                 titleLine.appendChild(starToggle);
                 titleLine.appendChild(link);
@@ -607,6 +612,7 @@
 
                 const meta = document.createElement('div');
                 const timeText = task.lastPostTime ? formatRelativeTime(task.lastPostTime) : 'Bez komentářů';
+                const statusText = isCompleted ? '✓ Ukončený · ' : '';
                 const timeTotal = task.approvedTimeMinutes ? formatMinutesToHours(task.approvedTimeMinutes) : '';
                 const authorText = task.lastPostAuthor ? ` · ${task.lastPostAuthor}` : '';
                 const cleanText = task.lastPostText ? task.lastPostText.replace(/\s+/g, ' ').trim() : '';
@@ -618,7 +624,7 @@
                 const errorText = checkError ? ' · kontrola selhala' : '';
                 link.title = displayName;
                 const leftText = document.createElement('span');
-                leftText.textContent = `${timeText}${authorText}${checkingText}${errorText}`;
+                leftText.textContent = `${statusText}${timeText}${authorText}${checkingText}${errorText}`;
                 if (checkError) {
                     leftText.title = checkError;
                     leftText.style.color = '#9f1607';
@@ -629,7 +635,9 @@
                     'font-size: 11px',
                     'display: flex',
                     'align-items: baseline',
-                    'gap: 6px'
+                    'gap: 6px',
+                    'box-sizing: border-box',
+                    'padding-inline-start: 19px'
                 ].join(';');
                 if (task.lastPostTime) {
                     meta.title = formatTimestamp(task.lastPostTime);
@@ -653,6 +661,8 @@
                         'overflow: hidden',
                         'white-space: normal',
                         'line-height: 1.2',
+                        'box-sizing: border-box',
+                        'padding-inline-start: 19px',
                         task.hasNew ? 'max-height: 1.2em' : 'max-height: 0',
                         task.hasNew ? 'opacity: 1' : 'opacity: 0',
                         task.hasNew ? 'margin-top: 0' : 'margin-top: 0',
@@ -914,6 +924,31 @@
         return true;
     }
 
+    function setVisitedTaskCompletion(task, completed) {
+        if (!task?.id) return;
+        const tasks = readVisitedTasks();
+        const index = tasks.findIndex(item => String(item.id) === String(task.id));
+        if (index < 0 && !completed) return;
+
+        const currentTask = index >= 0 ? tasks[index] : task;
+        const updatedTask = {
+            ...currentTask,
+            completed: Boolean(completed)
+        };
+        if (completed) {
+            updatedTask.completedAt = Date.now();
+        } else {
+            delete updatedTask.completedAt;
+        }
+
+        if (index >= 0) {
+            tasks[index] = updatedTask;
+        } else {
+            tasks.push(updatedTask);
+        }
+        writeVisitedTasks(tasks);
+    }
+
     async function checkStarredTasksForUpdates() {
         const tasks = normalizeStarredTasks();
         if (tasks.length === 0) return;
@@ -956,13 +991,7 @@
                     throw new Error('Server nevrátil očekávaný detail úkolu. Možná vypršelo přihlášení.');
                 }
 
-                if (isTaskCompletedInDocument(doc)) {
-                    updateStarredTaskById(taskId, () => null);
-                    console.log(`PBS check ${getTaskDisplayName(task)}: task completed, removing from watched tasks`);
-                    safeSetStorageItem(lastCheckKey, String(Date.now()));
-                    continue;
-                }
-
+                const isCompleted = isTaskCompletedInDocument(doc);
                 const latestInfo = getLastPostInfoFromDocument(doc);
                 const latestTime = latestInfo ? latestInfo.time : 0;
                 const lastLog = latestInfo
@@ -979,8 +1008,13 @@
                     }
                     currentTask.approvedTimeMinutes = approvedMinutes;
                     currentTask.hasNew = Boolean(latestTime && lastVisit && latestTime > lastVisit);
+                    currentTask.completed = isCompleted;
                     return currentTask;
                 });
+                setVisitedTaskCompletion(task, isCompleted);
+                if (isCompleted) {
+                    console.log(`PBS check ${getTaskDisplayName(task)}: task completed`);
+                }
                 safeSetStorageItem(lastCheckKey, String(Date.now()));
             } catch (error) {
                 const message = error.name === 'AbortError'
@@ -1018,6 +1052,7 @@
         const approvedMinutes = getApprovedUniqueTimeFromDocument(document);
         if (match) {
             match.approvedTimeMinutes = approvedMinutes;
+            match.completed = Boolean(taskMeta.completed);
             if (match.hasNew) match.hasNew = false;
             writeStarredTasks(tasks);
         }
@@ -1034,6 +1069,7 @@
             id: taskMeta.id,
             lastVisitedAt: now,
             approvedTimeMinutes: approvedMinutes,
+            completed: Boolean(taskMeta.completed),
             hasNew: false
         };
 
@@ -1049,6 +1085,7 @@
             visitedTasks.push(visitedTask);
         }
         writeVisitedTasks(visitedTasks);
+        updateCurrentTaskStarIcon();
         renderStarredTasks();
     }
 
@@ -1154,7 +1191,7 @@
             starToggle.id = 'pbs-star-toggle';
             starToggle.className = 'pbs-control';
             starToggle.setAttribute('aria-label', 'Sledovat úkol');
-            starToggle.style.cssText = 'cursor:pointer;border:0;background:transparent;padding:0;font-size:26px;color:#b58b00;position:absolute;inset-inline-start:25px;top:23px;';
+            starToggle.style.cssText = 'cursor:pointer;border:0;background:transparent;padding:0;font-size:26px;color:#f2c200;position:absolute;inset-inline-start:25px;top:23px;';
             h2.appendChild(starToggle);
 
             const nameText = document.createElement('span');
@@ -1773,7 +1810,8 @@
             name: displayName,
             originalName: data.name,
             client: data.client,
-            url: buildParamUrl(nameSlug, data.id, data.client)
+            url: buildParamUrl(nameSlug, data.id, data.client),
+            completed: isTaskCompletedInDocument(document)
         };
         handleVisitTracking(data.id);
         updateCurrentTaskFromPage(currentTaskMeta);

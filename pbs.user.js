@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.1.0
+// @version      0.3.0
 // @description  Add project name as query param and redirect
-// @match        https://pbs2.praguebest.cz/main.php*action=detail*
+// @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
 // @downloadURL  https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
 // @grant        none
@@ -20,25 +20,68 @@
     };
 
     const systemCommentPatterns = [
-        /^<strong>Přidáno:/,
+        /^Přidáno:/,
         /^Změna času spolupracovníka/,
         /^Uživatel požádal o čas/,
         /^Změna autora/,
-        /^<strong>Předáno:.*?<\/strong><br>\s*$/
+        /^Předáno:/
     ];
     const checkingTaskIds = new Set();
+    const taskCheckErrors = new Map();
+    const POST_MARKER_KEY = 'PBS_pending_post';
+    const STARRED_TASKS_KEY = 'PBS_starred_tasks';
+    const TASK_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+    const TASK_CHECK_TIMEOUT_MS = 15 * 1000;
+    const MAX_VISITED_TASKS = 200;
 
-    function isSystemCommentContent(html) {
-        const text = (html || '').trim();
+    function normalizeText(value) {
+        return (value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isSystemCommentContent(content) {
+        const text = normalizeText(
+            typeof content === 'string' ? content.replace(/<[^>]*>/g, ' ') : content?.textContent
+        );
         return systemCommentPatterns.some(pattern => pattern.test(text));
     }
 
     function checkPostRequest() {
-        return performance.getEntriesByType('navigation')[0]?.nextHopProtocol === 'POST';
+        const timestamp = Number(safeGetStorageItem(POST_MARKER_KEY, sessionStorage) || 0);
+        safeRemoveStorageItem(POST_MARKER_KEY, sessionStorage);
+        const navigation = performance.getEntriesByType('navigation')[0];
+        const wasRedirected = Number(navigation?.redirectCount || 0) > 0;
+        return !wasRedirected && timestamp > 0 && Date.now() - timestamp < 30 * 1000;
+    }
+
+    function trackPostSubmissions() {
+        document.addEventListener('submit', event => {
+            const form = event.target;
+            if (!(form instanceof HTMLFormElement)) return;
+            const method = (form.getAttribute('method') || 'get').toLowerCase();
+            if (method === 'post') {
+                safeSetStorageItem(POST_MARKER_KEY, String(Date.now()), sessionStorage);
+            }
+        }, true);
+    }
+
+    function isTaskDetailUrl() {
+        const url = new URL(window.location.href);
+        return url.pathname === '/main.php'
+            && url.searchParams.get('action') === 'detail'
+            && Boolean(url.searchParams.get('id'));
     }
 
     function handlePathRedirect() {
-        const pathParts = window.location.pathname.split('/').filter(p => p);
+        const pathParts = window.location.pathname
+            .split('/')
+            .filter(Boolean)
+            .map(part => {
+                try {
+                    return decodeURIComponent(part);
+                } catch (error) {
+                    return part;
+                }
+            });
         if (pathParts.length === 3 && /^\d+$/.test(pathParts[2])) {
             const redirectUrl = buildParamUrl(pathParts[1], pathParts[2], pathParts[0]);
             window.location = redirectUrl;
@@ -50,11 +93,13 @@
     function createSlug(str) {
         return str
             .replace(/[áčďéěíňóřšťůúýžÁČĎÉĚÍŇÓŘŠŤŮÚÝŽ]/g, c => translitMap[c] || c)
+            .normalize('NFD')
+            .replace(/\p{M}/gu, '')
             .toLowerCase()
             .replace(/\s+/g, '-')
-            .replace(/[^\w\-]/g, '')
-            .replace(/\-+/g, '-')
-            .replace(/^\-|\-$/g, '');
+            .replace(/[^\p{L}\p{N}_-]/gu, '')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
     }
 
     function buildTValue(client, nameSlug) {
@@ -67,14 +112,25 @@
 
     function buildParamUrl(nameSlug, id, client) {
         const tValue = buildTValue(client, nameSlug);
-        return `https://pbs2.praguebest.cz/main.php?action=detail&id=${id}&t=${encodeURIComponent(tValue)}`;
+        const url = new URL('/main.php', window.location.origin);
+        url.searchParams.set('action', 'detail');
+        url.searchParams.set('id', String(id));
+        url.searchParams.set('t', tValue);
+        return url.href;
     }
 
-    function extractTableData() {
-        const table = document.querySelector('table.itable');
+    function findTaskDetailTable(doc = document) {
+        return Array.from(doc.querySelectorAll('table.itable')).find(table => {
+            const labels = Array.from(table.querySelectorAll('tr th')).map(th => normalizeText(th.textContent));
+            return labels.includes('ID:') && labels.some(label => label.includes('Název:'));
+        }) || null;
+    }
+
+    function extractTableData(doc = document, hideTable = true) {
+        const table = findTaskDetailTable(doc);
         if (!table) return null;
 
-        let data = { name: '', id: '', client: '' };
+        const data = { name: '', id: '', client: '' };
         const rows = table.querySelectorAll('tbody tr');
 
         for (const row of rows) {
@@ -88,16 +144,47 @@
             if (th.textContent.includes('Zákazník:')) data.client = td.textContent.trim();
         }
 
-        table.style.display = 'none';
+        if (!data.name || !data.id) return null;
+        if (hideTable) table.style.display = 'none';
         return data;
     }
 
+    function safeGetStorageItem(key, storage = localStorage) {
+        try {
+            return storage.getItem(key);
+        } catch (error) {
+            console.warn(`PBS: storage read failed for ${key}`, error);
+            return null;
+        }
+    }
+
+    function safeSetStorageItem(key, value, storage = localStorage) {
+        try {
+            storage.setItem(key, value);
+            return true;
+        } catch (error) {
+            console.warn(`PBS: storage write failed for ${key}`, error);
+            showPbsMessage('Nastavení se nepodařilo uložit. Zkontrolujte volné místo prohlížeče.', true);
+            return false;
+        }
+    }
+
+    function safeRemoveStorageItem(key, storage = localStorage) {
+        try {
+            storage.removeItem(key);
+        } catch (error) {
+            console.warn(`PBS: storage removal failed for ${key}`, error);
+        }
+    }
+
     function readStarredTasks() {
-        const stored = localStorage.getItem('PBS_starred_tasks');
+        const stored = safeGetStorageItem(STARRED_TASKS_KEY);
         if (!stored) return [];
         try {
             const parsed = JSON.parse(stored);
-            return Array.isArray(parsed) ? parsed : [];
+            return Array.isArray(parsed)
+                ? parsed.filter(task => task && typeof task === 'object')
+                : [];
         } catch (e) {
             return [];
         }
@@ -108,47 +195,189 @@
     const TASK_LIST_MODE_VISITED = 'visited';
     const VISITED_TASKS_KEY = 'PBS_visited_tasks';
     const TASK_LIST_COLLAPSED_KEY = 'PBS_task_list_collapsed';
+    const CUSTOM_TASK_NAMES_KEY = 'PBS_custom_task_names';
 
     function writeStarredTasks(tasks) {
-        localStorage.setItem('PBS_starred_tasks', JSON.stringify(tasks));
+        safeSetStorageItem(STARRED_TASKS_KEY, JSON.stringify(tasks));
     }
 
     function readTaskListMode() {
-        const stored = localStorage.getItem(TASK_LIST_MODE_KEY);
+        const stored = safeGetStorageItem(TASK_LIST_MODE_KEY);
         return stored === TASK_LIST_MODE_VISITED ? TASK_LIST_MODE_VISITED : TASK_LIST_MODE_STARRED;
     }
 
     function writeTaskListMode(mode) {
         const value = mode === TASK_LIST_MODE_VISITED ? TASK_LIST_MODE_VISITED : TASK_LIST_MODE_STARRED;
-        localStorage.setItem(TASK_LIST_MODE_KEY, value);
+        safeSetStorageItem(TASK_LIST_MODE_KEY, value);
     }
 
     function readVisitedTasks() {
-        const stored = localStorage.getItem(VISITED_TASKS_KEY);
+        const stored = safeGetStorageItem(VISITED_TASKS_KEY);
         if (!stored) return [];
         try {
             const parsed = JSON.parse(stored);
-            return Array.isArray(parsed) ? parsed : [];
+            return Array.isArray(parsed)
+                ? parsed.filter(task => task && typeof task === 'object')
+                : [];
         } catch (e) {
             return [];
         }
     }
 
     function writeVisitedTasks(tasks) {
-        localStorage.setItem(VISITED_TASKS_KEY, JSON.stringify(tasks));
+        const uniqueTasks = new Map();
+        [...tasks]
+            .sort((a, b) => Number(b.lastVisitedAt || 0) - Number(a.lastVisitedAt || 0))
+            .forEach(task => {
+                const key = String(task.id || task.url || '');
+                if (key && !uniqueTasks.has(key)) uniqueTasks.set(key, task);
+            });
+        safeSetStorageItem(
+            VISITED_TASKS_KEY,
+            JSON.stringify(Array.from(uniqueTasks.values()).slice(0, MAX_VISITED_TASKS))
+        );
+    }
+
+    function readCustomTaskNames() {
+        const stored = safeGetStorageItem(CUSTOM_TASK_NAMES_KEY);
+        if (!stored) return {};
+        try {
+            const parsed = JSON.parse(stored);
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function getCustomTaskName(id) {
+        if (!id) return '';
+        const value = readCustomTaskNames()[String(id)];
+        return typeof value === 'string' ? value.trim() : '';
+    }
+
+    function writeCustomTaskName(id, name) {
+        if (!id) return;
+        const names = readCustomTaskNames();
+        const trimmedName = (name || '').trim();
+        if (trimmedName) {
+            names[String(id)] = trimmedName;
+        } else {
+            delete names[String(id)];
+        }
+        safeSetStorageItem(CUSTOM_TASK_NAMES_KEY, JSON.stringify(names));
+    }
+
+    function getTaskDisplayName(task) {
+        return getCustomTaskName(task?.id) || task?.name || '';
+    }
+
+    function getTaskUrl(task) {
+        const displayName = getTaskDisplayName(task);
+        if (!task?.id || !displayName) return task?.url || '';
+        return buildParamUrl(createSlug(displayName), task.id, task.client);
+    }
+
+    function updateStoredTaskName(id, originalName, client) {
+        if (!id) return;
+        const displayName = getCustomTaskName(id) || originalName;
+        const url = buildParamUrl(createSlug(displayName), id, client);
+
+        const updateTasks = (readTasks, writeTasks) => {
+            const tasks = readTasks();
+            let changed = false;
+            tasks.forEach(task => {
+                if (String(task.id) !== String(id)) return;
+                task.name = displayName;
+                task.originalName = originalName;
+                task.client = client;
+                task.url = url;
+                changed = true;
+            });
+            if (changed) writeTasks(tasks);
+        };
+
+        updateTasks(readStarredTasks, writeStarredTasks);
+        updateTasks(readVisitedTasks, writeVisitedTasks);
     }
 
     function isTaskListCollapsed() {
-        return localStorage.getItem(TASK_LIST_COLLAPSED_KEY) === '1';
+        return safeGetStorageItem(TASK_LIST_COLLAPSED_KEY) === '1';
     }
 
     function writeTaskListCollapsed(collapsed) {
-        localStorage.setItem(TASK_LIST_COLLAPSED_KEY, collapsed ? '1' : '0');
+        safeSetStorageItem(TASK_LIST_COLLAPSED_KEY, collapsed ? '1' : '0');
+    }
+
+    function showPbsMessage(message, isError = false) {
+        if (!document.body) return;
+        let messageBox = document.getElementById('pbs-message');
+        if (!messageBox) {
+            messageBox = document.createElement('div');
+            messageBox.id = 'pbs-message';
+            messageBox.setAttribute('role', 'status');
+            messageBox.setAttribute('aria-live', 'polite');
+            messageBox.style.cssText = [
+                'position: fixed',
+                'inset-inline-end: 16px',
+                'inset-block-start: 72px',
+                'z-index: 10000',
+                'max-width: min(360px, calc(100vw - 32px))',
+                'padding: 10px 12px',
+                'border-radius: 6px',
+                'box-shadow: 0 6px 18px rgba(0,0,0,0.18)',
+                'font-size: 13px',
+                'line-height: 1.4'
+            ].join(';');
+            document.body.appendChild(messageBox);
+        }
+
+        messageBox.style.background = isError ? '#7d1a12' : '#243429';
+        messageBox.style.color = '#fff';
+        messageBox.textContent = message;
+        messageBox.hidden = false;
+        window.clearTimeout(showPbsMessage.timeoutId);
+        showPbsMessage.timeoutId = window.setTimeout(() => {
+            messageBox.hidden = true;
+        }, isError ? 5000 : 2500);
+    }
+
+    function ensurePbsStyles() {
+        if (document.getElementById('pbs-userscript-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'pbs-userscript-styles';
+        style.textContent = `
+            .pbs-control:focus-visible,
+            #pbs-star-toggle:focus-visible {
+                outline: 2px solid #9f1607;
+                outline-offset: 2px;
+            }
+            #pbs-starred-panel a:focus-visible {
+                outline: 2px solid #9f1607;
+                outline-offset: 2px;
+                border-radius: 2px;
+            }
+            @media (max-width: 560px) {
+                #pbs-starred-panel {
+                    inset-inline: 8px !important;
+                    bottom: 8px !important;
+                    max-width: none !important;
+                    font-size: 14px !important;
+                }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function getTaskListTitle() {
+        return readTaskListMode() === TASK_LIST_MODE_VISITED
+            ? 'Navštívené úkoly'
+            : 'Sledované úkoly';
     }
 
     function ensureStarredTasksPanel() {
         let panel = document.getElementById('pbs-starred-panel');
         if (panel) return panel;
+        ensurePbsStyles();
 
         panel = document.createElement('div');
         panel.id = 'pbs-starred-panel';
@@ -164,13 +393,19 @@
             'padding: 10px 12px',
             'text-align: left',
             'line-height: 1.5em',
-            'font-size: 12px',
+            'font-size: 13px',
             'max-width: 260px',
             'max-height: 50vh',
             'overflow: auto'
         ].join(';');
 
         const header = document.createElement('div');
+        header.id = 'pbs-task-list-header';
+        header.className = 'pbs-control';
+        header.tabIndex = 0;
+        header.setAttribute('role', 'button');
+        header.setAttribute('aria-controls', 'pbs-starred-list');
+        header.setAttribute('aria-expanded', String(!isTaskListCollapsed()));
         header.style.cssText = [
             'display: flex',
             'align-items: center',
@@ -203,7 +438,7 @@
         }
 
         function updateHeaderLabel() {
-            title.textContent = `${isTaskListCollapsed() ? '▸' : '▾'} Sledované úkoly`;
+            title.textContent = `${isTaskListCollapsed() ? '▸' : '▾'} ${getTaskListTitle()}`;
         }
 
         viewToggle.addEventListener('click', (event) => {
@@ -218,6 +453,13 @@
         });
 
         header.addEventListener('click', () => {
+            writeTaskListCollapsed(!isTaskListCollapsed());
+            renderStarredTasks();
+        });
+        header.addEventListener('keydown', event => {
+            if (event.target !== header) return;
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
             writeTaskListCollapsed(!isTaskListCollapsed());
             renderStarredTasks();
         });
@@ -238,7 +480,7 @@
 
     function getLastVisitTimeForTask(task) {
         if (!task?.id) return 0;
-        const value = localStorage.getItem(`PBS_lastVisit_${task.id}`);
+        const value = safeGetStorageItem(`PBS_lastVisit_${task.id}`);
         return value ? parseInt(value, 10) || 0 : 0;
     }
 
@@ -273,18 +515,20 @@
         const panel = ensureStarredTasksPanel();
         const list = panel.querySelector('#pbs-starred-list');
         const title = panel.querySelector('#pbs-task-list-title');
+        const header = panel.querySelector('#pbs-task-list-header');
         const tasks = getTasksForActiveMode();
         const collapsed = isTaskListCollapsed();
 
         if (title) {
-            title.textContent = `${collapsed ? '▸' : '▾'} Sledované úkoly`;
+            title.textContent = `${collapsed ? '▸' : '▾'} ${getTaskListTitle()}`;
         }
 
         if (list) {
             list.style.display = collapsed ? 'none' : 'block';
         }
+        header?.setAttribute('aria-expanded', String(!collapsed));
 
-        list.innerHTML = '';
+        list.replaceChildren();
         if (tasks.length === 0) {
             const empty = document.createElement('div');
             empty.textContent = readTaskListMode() === TASK_LIST_MODE_VISITED
@@ -303,6 +547,7 @@
         });
 
         const byClient = new Map();
+        const starredIds = new Set(readStarredTasks().map(task => String(task.id || '')));
 
         sortedTasks.forEach(task => {
             const clientName = task.client || 'Neznámý klient';
@@ -323,12 +568,42 @@
                     row.style.fontWeight = '700';
                 }
 
-                const link = document.createElement('a');
-                link.href = task.url;
-                link.textContent = task.name;
-                link.style.cssText = 'color: #c81b08; text-decoration: none;';
+                const titleLine = document.createElement('div');
+                titleLine.style.cssText = 'display: flex; align-items: baseline; gap: 4px;';
 
-                row.appendChild(link);
+                const starToggle = document.createElement('button');
+                const isStarred = starredIds.has(String(task.id || ''));
+                starToggle.type = 'button';
+                starToggle.className = 'pbs-control';
+                starToggle.textContent = isStarred ? '★' : '☆';
+                starToggle.title = isStarred ? 'Přestat sledovat úkol' : 'Sledovat úkol';
+                starToggle.setAttribute('aria-label', starToggle.title);
+                starToggle.style.cssText = [
+                    'border: 0',
+                    'background: transparent',
+                    'padding: 0',
+                    'color: #8a6900',
+                    'font-size: 15px',
+                    'line-height: 1',
+                    'cursor: pointer',
+                    'flex: 0 0 auto'
+                ].join(';');
+                starToggle.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleTaskStar(task);
+                });
+
+                const link = document.createElement('a');
+                const displayName = getTaskDisplayName(task);
+                const taskUrl = getTaskUrl(task);
+                link.href = taskUrl;
+                link.textContent = displayName;
+                link.style.cssText = 'color: #9f1607; text-decoration: none; min-width: 0; overflow-wrap: anywhere;';
+
+                titleLine.appendChild(starToggle);
+                titleLine.appendChild(link);
+                row.appendChild(titleLine);
 
                 const meta = document.createElement('div');
                 const timeText = task.lastPostTime ? formatRelativeTime(task.lastPostTime) : 'Bez komentářů';
@@ -337,10 +612,17 @@
                 const cleanText = task.lastPostText ? task.lastPostText.replace(/\s+/g, ' ').trim() : '';
                 const previewLimit = 240;
                 const previewText = cleanText ? cleanText.slice(0, previewLimit) : '';
-                const checkingText = task.id && checkingTaskIds.has(task.id) ? ' · kontroluji...' : '';
-                link.title = task.name;
+                const taskId = String(task.id || '');
+                const checkingText = taskId && checkingTaskIds.has(taskId) ? ' · kontroluji…' : '';
+                const checkError = taskCheckErrors.get(taskId);
+                const errorText = checkError ? ' · kontrola selhala' : '';
+                link.title = displayName;
                 const leftText = document.createElement('span');
-                leftText.textContent = `${timeText}${authorText}${checkingText}`;
+                leftText.textContent = `${timeText}${authorText}${checkingText}${errorText}`;
+                if (checkError) {
+                    leftText.title = checkError;
+                    leftText.style.color = '#9f1607';
+                }
                 meta.appendChild(leftText);
                 meta.style.cssText = [
                     'color: #666',
@@ -374,7 +656,7 @@
                         task.hasNew ? 'max-height: 1.2em' : 'max-height: 0',
                         task.hasNew ? 'opacity: 1' : 'opacity: 0',
                         task.hasNew ? 'margin-top: 0' : 'margin-top: 0',
-                        'transition: max-height 0.15s ease, opacity 0.15s ease'
+                        'transition: opacity 0.15s ease-out'
                     ].join(';');
                     row.appendChild(textLine);
 
@@ -391,7 +673,7 @@
 
                 row.addEventListener('click', (event) => {
                     if (event.target.closest('a')) return;
-                    window.location.href = task.url;
+                    window.location.href = taskUrl;
                 });
 
                 list.appendChild(row);
@@ -427,8 +709,41 @@
         return tasks;
     }
 
+    function toggleTaskStar(task) {
+        if (!task?.id) return;
+        const tasks = readStarredTasks();
+        const existingIndex = tasks.findIndex(item => String(item.id) === String(task.id));
+
+        if (existingIndex >= 0) {
+            tasks.splice(existingIndex, 1);
+        } else {
+            const displayName = getTaskDisplayName(task);
+            tasks.push({
+                ...task,
+                name: displayName,
+                originalName: task.originalName || task.name || displayName,
+                url: getTaskUrl(task),
+                hasNew: Boolean(task.hasNew)
+            });
+        }
+
+        writeStarredTasks(tasks);
+        updateCurrentTaskStarIcon();
+        renderStarredTasks();
+    }
+
+    function updateCurrentTaskStarIcon() {
+        const starToggle = document.getElementById('pbs-star-toggle');
+        if (!starToggle) return;
+
+        const currentTaskId = new URL(window.location.href).searchParams.get('id');
+        const isStarred = readStarredTasks().some(task => String(task.id) === String(currentTaskId));
+        starToggle.textContent = isStarred ? '★' : '☆';
+        starToggle.title = isStarred ? 'Přestat sledovat úkol' : 'Sledovat úkol';
+        starToggle.setAttribute('aria-label', starToggle.title);
+    }
+
     function collectApprovedTimeWithoutCounterparts(doc) {
-        const cutoffMs = 1769598969 * 1000;
         const userNameSelector = '#head > div > nav > div.Navigation-userBar.UserBar.js-navigation-userbar > div > a > span > strong';
         const currentUserName = doc.querySelector(userNameSelector)?.textContent.trim()
             || document.querySelector(userNameSelector)?.textContent.trim()
@@ -454,7 +769,7 @@
 
             const dateText = item.querySelector('.timrd')?.textContent.trim() || '';
             const itemDate = dateText ? parseDate(dateText) : null;
-            if (!itemDate || itemDate.getTime() < cutoffMs) return;
+            if (!itemDate) return;
 
             const descEls = item.querySelectorAll('.timrds');
             if (descEls.length < 2) return;
@@ -496,8 +811,7 @@
             const content = comment.querySelector('.ck-content');
             if (!content) return;
 
-            const html = content.innerHTML.trim();
-            if (isSystemCommentContent(html)) return;
+            if (isSystemCommentContent(content)) return;
 
             const dateSpan = comment.querySelector('.Post-date');
             const date = dateSpan ? parseDate(dateSpan.textContent || '') : null;
@@ -517,18 +831,34 @@
         return latest;
     }
 
+    function isTaskCompletedInDocument(doc) {
+        const table = findTaskDetailTable(doc);
+        if (!table) return false;
+        const statusRow = Array.from(table.querySelectorAll('tr')).find(row => {
+            const header = row.querySelector('th');
+            return normalizeText(header?.textContent).toLocaleLowerCase('cs') === 'status:';
+        });
+        const statusHeader = statusRow?.querySelector('th');
+        const statusCell = statusHeader?.nextElementSibling;
+        return normalizeText(statusCell?.textContent).toLocaleLowerCase('cs') === 'ukončený';
+    }
+
     function formatTimestamp(timestamp) {
-        const date = new Date(timestamp);
-        const day = String(date.getDate()).padStart(2, '0');
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const year = date.getFullYear();
-        const hour = String(date.getHours()).padStart(2, '0');
-        const minute = String(date.getMinutes()).padStart(2, '0');
-        return `${day}.${month}.${year} ${hour}:${minute}`;
+        const date = new Date(Number(timestamp));
+        if (Number.isNaN(date.getTime())) return 'Neznámý čas';
+        return new Intl.DateTimeFormat('cs-CZ', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        }).format(date);
     }
 
     function formatRelativeTime(timestamp) {
-        const deltaMs = Date.now() - timestamp;
+        const numericTimestamp = Number(timestamp);
+        if (!Number.isFinite(numericTimestamp)) return 'Neznámý čas';
+        const deltaMs = Math.max(0, Date.now() - numericTimestamp);
         if (deltaMs < 60 * 1000) return 'právě teď';
         const minutes = Math.floor(deltaMs / (60 * 1000));
         if (minutes < 60) return `${minutes}m`;
@@ -544,13 +874,13 @@
         if (!match) return 0;
         const hours = parseInt(match[1], 10);
         const minutes = parseInt(match[2], 10);
-        if (Number.isNaN(hours) || Number.isNaN(minutes)) return 0;
+        if (Number.isNaN(hours) || Number.isNaN(minutes) || minutes >= 60) return 0;
         return (hours * 60) + minutes;
     }
 
     function parseTimeParts(value) {
         const match = value.match(/^(\d+):(\d{2})$/);
-        if (!match) return null;
+        if (!match || Number(match[2]) >= 60) return null;
         return {
             hours: match[1],
             minutes: match[2]
@@ -569,77 +899,103 @@
         return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
     }
 
+    function updateStarredTaskById(id, updater) {
+        const tasks = readStarredTasks();
+        const index = tasks.findIndex(task => String(task.id) === String(id));
+        if (index < 0) return false;
+
+        const updatedTask = updater({ ...tasks[index] });
+        if (updatedTask === null) {
+            tasks.splice(index, 1);
+        } else {
+            tasks[index] = updatedTask;
+        }
+        writeStarredTasks(tasks);
+        return true;
+    }
+
     async function checkStarredTasksForUpdates() {
         const tasks = normalizeStarredTasks();
         if (tasks.length === 0) return;
 
         const now = Date.now();
-        let changed = false;
 
         for (const task of tasks) {
-            if (!task.id || !task.url) continue;
+            if (!task.id) continue;
 
+            const taskId = String(task.id);
+            const taskUrl = getTaskUrl(task);
+            if (!taskUrl) {
+                taskCheckErrors.set(taskId, 'Úkol nemá platnou URL.');
+                continue;
+            }
             const lastVisitKey = `PBS_lastVisit_${task.id}`;
             const lastCheckKey = `PBS_lastCheck_${task.id}`;
-            const lastVisit = parseInt(localStorage.getItem(lastVisitKey) || '0', 10);
+            const lastVisit = parseInt(safeGetStorageItem(lastVisitKey) || '0', 10);
+            const lastCheck = parseInt(safeGetStorageItem(lastCheckKey) || '0', 10);
+            if (lastCheck && now - lastCheck < TASK_CHECK_INTERVAL_MS) continue;
+            if (!readStarredTasks().some(item => String(item.id) === taskId)) continue;
 
+            const controller = new AbortController();
+            const timeoutId = window.setTimeout(() => controller.abort(), TASK_CHECK_TIMEOUT_MS);
             try {
-                checkingTaskIds.add(task.id);
+                checkingTaskIds.add(taskId);
+                taskCheckErrors.delete(taskId);
                 renderStarredTasks();
-                const response = await fetch(task.url);
-                if (!response.ok) continue;
+                const response = await fetch(taskUrl, {
+                    credentials: 'same-origin',
+                    signal: controller.signal
+                });
+                if (!response.ok) {
+                    throw new Error(`Server odpověděl stavem ${response.status}.`);
+                }
                 const html = await response.text();
                 const doc = new DOMParser().parseFromString(html, 'text/html');
+                const fetchedTask = extractTableData(doc, false);
+                if (!fetchedTask || String(fetchedTask.id) !== taskId) {
+                    throw new Error('Server nevrátil očekávaný detail úkolu. Možná vypršelo přihlášení.');
+                }
+
+                if (isTaskCompletedInDocument(doc)) {
+                    updateStarredTaskById(taskId, () => null);
+                    console.log(`PBS check ${getTaskDisplayName(task)}: task completed, removing from watched tasks`);
+                    safeSetStorageItem(lastCheckKey, String(Date.now()));
+                    continue;
+                }
+
                 const latestInfo = getLastPostInfoFromDocument(doc);
                 const latestTime = latestInfo ? latestInfo.time : 0;
                 const lastLog = latestInfo
                     ? `${latestInfo.author} @ ${formatTimestamp(latestInfo.time)}`
                     : 'no posts';
-                console.log(`PBS check ${task.name}: ${lastLog}`);
-
-                if (latestInfo) {
-                    if (latestInfo.time && task.lastPostTime !== latestInfo.time) {
-                        task.lastPostTime = latestInfo.time;
-                        changed = true;
-                    }
-                    if (task.lastPostAuthor !== latestInfo.author) {
-                        task.lastPostAuthor = latestInfo.author;
-                        changed = true;
-                    }
-                    const trimmedText = trimText(latestInfo.text, 500);
-                    if (task.lastPostText !== trimmedText) {
-                        task.lastPostText = trimmedText;
-                        changed = true;
-                    }
-                }
+                console.log(`PBS check ${getTaskDisplayName(task)}: ${lastLog}`);
 
                 const approvedMinutes = getApprovedUniqueTimeFromDocument(doc);
-                if (task.approvedTimeMinutes !== approvedMinutes) {
-                    task.approvedTimeMinutes = approvedMinutes;
-                    changed = true;
-                }
-
-                if (latestTime && lastVisit && latestTime > lastVisit) {
-                    if (!task.hasNew) {
-                        task.hasNew = true;
-                        changed = true;
+                updateStarredTaskById(taskId, currentTask => {
+                    if (latestInfo) {
+                        currentTask.lastPostTime = latestInfo.time;
+                        currentTask.lastPostAuthor = latestInfo.author;
+                        currentTask.lastPostText = trimText(latestInfo.text, 500);
                     }
-                } else if (task.hasNew) {
-                    task.hasNew = false;
-                    changed = true;
-                }
-                localStorage.setItem(lastCheckKey, String(now));
-            } catch (e) {
-                // Ignore failed background fetches.
+                    currentTask.approvedTimeMinutes = approvedMinutes;
+                    currentTask.hasNew = Boolean(latestTime && lastVisit && latestTime > lastVisit);
+                    return currentTask;
+                });
+                safeSetStorageItem(lastCheckKey, String(Date.now()));
+            } catch (error) {
+                const message = error.name === 'AbortError'
+                    ? 'Kontrola vypršela. Zkuste to znovu při dalším načtení stránky.'
+                    : error.message || 'Úkol se nepodařilo zkontrolovat.';
+                taskCheckErrors.set(taskId, message);
+                console.warn(`PBS check ${getTaskDisplayName(task)} failed: ${message}`);
             } finally {
-                if (checkingTaskIds.has(task.id)) {
-                    checkingTaskIds.delete(task.id);
-                    renderStarredTasks();
-                }
+                window.clearTimeout(timeoutId);
+                checkingTaskIds.delete(taskId);
+                renderStarredTasks();
             }
         }
 
-        if (changed) writeStarredTasks(tasks);
+        updateCurrentTaskStarIcon();
         renderStarredTasks();
     }
 
@@ -648,7 +1004,7 @@
         const taskId = taskMeta.id;
         const now = Date.now();
         const tasks = readStarredTasks();
-        const match = tasks.find(task => task.id === taskId);
+        const match = tasks.find(task => String(task.id) === String(taskId));
 
         const latestInfo = getLastPostInfoFromDocument(document);
         if (latestInfo) {
@@ -672,6 +1028,7 @@
         const visitedTask = {
             ...baseTask,
             name: taskMeta.name,
+            originalName: taskMeta.originalName || taskMeta.name,
             url: taskMeta.url,
             client: taskMeta.client,
             id: taskMeta.id,
@@ -693,6 +1050,28 @@
         }
         writeVisitedTasks(visitedTasks);
         renderStarredTasks();
+    }
+
+    async function copyText(text) {
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+
+            const input = document.createElement('textarea');
+            input.value = text;
+            input.setAttribute('readonly', '');
+            input.style.cssText = 'position: fixed; opacity: 0; pointer-events: none;';
+            document.body.appendChild(input);
+            input.select();
+            const copied = document.execCommand('copy');
+            input.remove();
+            return copied;
+        } catch (error) {
+            console.warn('PBS: clipboard copy failed', error);
+            return false;
+        }
     }
 
     function fillStatementFormFromRow(timeText, description) {
@@ -760,98 +1139,150 @@
         });
     }
 
-    function setupHeader(name, id, client, nameSlug) {
+    function setupHeader(originalName, id, client) {
         const h2 = document.querySelector('h2');
-        const paramUrl = buildParamUrl(nameSlug, id, client);
+        let customName = getCustomTaskName(id);
+        let displayName = customName || originalName;
 
         if (h2) {
             h2.className = 'u-text--red';
             h2.style.margin = '20px 10px';
-            h2.innerHTML = `<span id="pbs-star-toggle" style="cursor:pointer;margin-right: 6px;font-size: 26px;color: #f2c200;position: absolute;left: 25px;top: 23px;" title="Sledovat úkol">☆</span>${name} <span href="${paramUrl}" id="quickCopy" style="cursor:pointer" title="Kopírovat URL">🔗</span>  <span style="font-size: smaller; float: right;">${client} #${id}</span>`;
+            h2.textContent = '';
 
-            const quickCopy = document.getElementById('quickCopy');
-            quickCopy.addEventListener('click', () => {
-                navigator.clipboard.writeText(paramUrl).then(() => {
-                    quickCopy.textContent = '✔';
-                    setTimeout(() => {
-                        quickCopy.textContent = '🔗';
-                    }, 1000);
-                });
-            });
+            const starToggle = document.createElement('button');
+            starToggle.type = 'button';
+            starToggle.id = 'pbs-star-toggle';
+            starToggle.className = 'pbs-control';
+            starToggle.setAttribute('aria-label', 'Sledovat úkol');
+            starToggle.style.cssText = 'cursor:pointer;border:0;background:transparent;padding:0;font-size:26px;color:#b58b00;position:absolute;inset-inline-start:25px;top:23px;';
+            h2.appendChild(starToggle);
 
-            const starToggle = document.getElementById('pbs-star-toggle');
-            const updateStarIcon = (isStarred) => {
-                starToggle.textContent = isStarred ? '★' : '☆';
+            const nameText = document.createElement('span');
+            nameText.id = 'pbs-task-name';
+            nameText.style.overflowWrap = 'anywhere';
+            h2.appendChild(nameText);
+
+            const renameButton = document.createElement('button');
+            renameButton.type = 'button';
+            renameButton.className = 'pbs-control';
+            renameButton.textContent = '✎';
+            renameButton.title = 'Přejmenovat úkol';
+            renameButton.setAttribute('aria-label', renameButton.title);
+            renameButton.style.cssText = 'border:0;background:transparent;color:#888;cursor:pointer;font-size:16px;padding:0 5px;';
+            h2.appendChild(renameButton);
+
+            const quickCopy = document.createElement('button');
+            quickCopy.type = 'button';
+            quickCopy.className = 'pbs-control';
+            quickCopy.id = 'quickCopy';
+            quickCopy.style.cssText = 'border:0;background:transparent;cursor:pointer;padding:2px 4px;';
+            quickCopy.title = 'Kopírovat URL';
+            quickCopy.setAttribute('aria-label', quickCopy.title);
+            quickCopy.textContent = '🔗';
+            h2.appendChild(quickCopy);
+
+            const taskMeta = document.createElement('span');
+            taskMeta.style.cssText = 'font-size: smaller; float: right;';
+            taskMeta.textContent = `${client} #${id}`;
+            h2.appendChild(taskMeta);
+
+            const originalNameLine = document.createElement('div');
+            originalNameLine.id = 'pbs-original-task-name';
+            originalNameLine.style.cssText = 'font-size: 11px; color: #888; font-weight: normal; margin-top: 2px;';
+            h2.after(originalNameLine);
+
+            const resetButton = document.createElement('button');
+            resetButton.type = 'button';
+            resetButton.textContent = 'Obnovit původní název';
+            resetButton.style.cssText = 'border:0;background:transparent;color:#888;text-decoration:underline;cursor:pointer;font-size:11px;padding:0 0 0 6px;';
+
+            const getParamUrl = () => buildParamUrl(createSlug(displayName), id, client);
+
+            const updateHeader = () => {
+                customName = getCustomTaskName(id);
+                displayName = customName || originalName;
+                nameText.textContent = displayName;
+                originalNameLine.textContent = '';
+                originalNameLine.style.display = customName ? 'block' : 'none';
+                if (customName) {
+                    originalNameLine.append(`Původní název: ${originalName}`);
+                    originalNameLine.appendChild(resetButton);
+                }
+                updateUrlParams(createSlug(displayName), client, id);
             };
 
-            const tasks = readStarredTasks();
-            const isStarred = tasks.some(task => task.url === paramUrl);
-            updateStarIcon(isStarred);
+            quickCopy.addEventListener('click', async () => {
+                quickCopy.disabled = true;
+                if (await copyText(getParamUrl())) {
+                    quickCopy.textContent = '✔';
+                    showPbsMessage('URL bylo zkopírováno.');
+                } else {
+                    quickCopy.textContent = '!';
+                    showPbsMessage('URL se nepodařilo zkopírovat. Zkopírujte ho z adresního řádku.', true);
+                }
+                window.setTimeout(() => {
+                    quickCopy.textContent = '🔗';
+                    quickCopy.disabled = false;
+                }, 1500);
+            });
+
+            const updateStarIcon = (isStarred) => {
+                starToggle.textContent = isStarred ? '★' : '☆';
+                starToggle.title = isStarred ? 'Přestat sledovat úkol' : 'Sledovat úkol';
+                starToggle.setAttribute('aria-label', starToggle.title);
+            };
+
+            const isCurrentTaskStarred = () => readStarredTasks().some(task => String(task.id) === String(id));
+            updateStarIcon(isCurrentTaskStarred());
 
             starToggle.addEventListener('click', () => {
-                const current = readStarredTasks();
-                const existingIndex = current.findIndex(task => task.url === paramUrl);
+                const visitedMatch = readVisitedTasks().find(task => String(task.id) === String(id));
+                toggleTaskStar({
+                    ...visitedMatch,
+                    name: displayName,
+                    originalName,
+                    url: getParamUrl(),
+                    client,
+                    id
+                });
+                updateStarIcon(isCurrentTaskStarred());
+            });
 
-                if (existingIndex >= 0) {
-                    current.splice(existingIndex, 1);
-                    updateStarIcon(false);
-                } else {
-                    const visitedMatch = readVisitedTasks().find(task => String(task.id) === String(id) || task.url === paramUrl);
-                    current.push({
-                        ...visitedMatch,
-                        name,
-                        url: paramUrl,
-                        client,
-                        id,
-                        hasNew: Boolean(visitedMatch?.hasNew)
-                    });
-                    updateStarIcon(true);
+            renameButton.addEventListener('click', () => {
+                const nextName = window.prompt('Nový název úkolu:', displayName);
+                if (nextName === null) return;
+                const trimmedName = nextName.trim();
+                if (!trimmedName) {
+                    showPbsMessage('Název úkolu nesmí být prázdný.', true);
+                    return;
+                }
+                if (trimmedName.length > 200) {
+                    showPbsMessage('Název úkolu může mít nejvýše 200 znaků.', true);
+                    return;
+                }
+                if (!createSlug(trimmedName)) {
+                    showPbsMessage('Název musí obsahovat alespoň jedno písmeno nebo číslo.', true);
+                    return;
                 }
 
-                writeStarredTasks(current);
+                writeCustomTaskName(id, trimmedName === originalName ? '' : trimmedName);
+                updateStoredTaskName(id, originalName, client);
+                updateHeader();
                 renderStarredTasks();
             });
 
+            resetButton.addEventListener('click', () => {
+                writeCustomTaskName(id, '');
+                updateStoredTaskName(id, originalName, client);
+                updateHeader();
+                renderStarredTasks();
+            });
+
+            updateHeader();
             renderStarredTasks();
         }
         return h2;
     }
-    function createUrlContainer(url) {
-        const container = document.createElement('div');
-        container.style.cssText = 'display: flex; align-items: center; margin: 10px; font-size: 12px; color: #666; gap: 8px;';
-
-        const urlLink = document.createElement('a');
-        urlLink.href = url;
-        urlLink.textContent = url;
-        urlLink.style.color = '#666';
-
-        const copyButton = document.createElement('button');
-        copyButton.textContent = 'Kopírovat';
-        copyButton.style.cssText = 'cursor: pointer; padding: 2px 8px; font-size: 12px;';
-
-        copyButton.addEventListener('click', () => {
-            navigator.clipboard.writeText(url).then(() => {
-                copyButton.textContent = 'Zkopírováno!';
-                setTimeout(() => {
-                    copyButton.textContent = 'Kopírovat';
-                }, 2000);
-            });
-        });
-
-        container.appendChild(urlLink);
-        container.appendChild(copyButton);
-        return container;
-    }
-
-    function setupUrlContainers(h2, data, nameSlug) {
-        const clientSlug = createSlug(data.client);
-        const prettyUrl = `https://pbs2.praguebest.cz/${clientSlug}/${nameSlug}/${data.id}`;
-        const paramUrl = buildParamUrl(nameSlug, data.id, data.client);
-
-        h2.after(createUrlContainer(paramUrl));
-        h2.after(createUrlContainer(prettyUrl));
-    }
-
     function cleanupElements() {
         document.querySelectorAll('[id*="disch"]').forEach(el => {
             el.style.display = 'none';
@@ -870,6 +1301,45 @@
 
         if (newpost) newpost.style.marginTop = 0;
         if (disw) disw.style.marginTop = 0;
+    }
+
+    function getSafeUrl(value) {
+        if (!value) return '';
+        try {
+            const url = new URL(value, window.location.origin);
+            return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+        } catch (error) {
+            return '';
+        }
+    }
+
+    function sanitizeHtmlFragment(html) {
+        const template = document.createElement('template');
+        template.innerHTML = html || '';
+        template.content.querySelectorAll('script, iframe, object, embed, form, input, button, meta, link, base, svg, math').forEach(
+            element => element.remove()
+        );
+        template.content.querySelectorAll('*').forEach(element => {
+            Array.from(element.attributes).forEach(attribute => {
+                const name = attribute.name.toLowerCase();
+                if (name.startsWith('on') || ['srcdoc', 'srcset', 'formaction', 'style', 'ping'].includes(name)) {
+                    element.removeAttribute(attribute.name);
+                    return;
+                }
+                if (['href', 'src'].includes(name) || name.endsWith(':href')) {
+                    const safeUrl = getSafeUrl(attribute.value);
+                    if (safeUrl) {
+                        element.setAttribute(attribute.name, safeUrl);
+                    } else {
+                        element.removeAttribute(attribute.name);
+                    }
+                }
+            });
+            if (element.tagName === 'A' && element.getAttribute('target') === '_blank') {
+                element.setAttribute('rel', 'noopener noreferrer');
+            }
+        });
+        return template.content;
     }
 
     function handleDescriptionContent() {
@@ -899,7 +1369,39 @@
         newComment.setAttribute('data-index', '0');
         newComment.setAttribute('data-id', '0');
         newComment.setAttribute('data-status', '');
-        newComment.innerHTML = `<div class="Grid"><div class="Grid-cell Post u-xs-size12of12 u-size10of12 u-lg-size12of12" style="border-color: #f50541;"><div class="post-header Post-headerContent" style="background-color: #f50541;"><div><a href="#note-0" class="anchor post-anchor">#0</a><div class="Post-address"><a class="post-author">Zadání</a></div></div></div><div class="Post-content"><div class="ck-content" id="commentText-0">${descContent}</div></div></div></div>`;
+
+        const grid = document.createElement('div');
+        grid.className = 'Grid';
+        const post = document.createElement('div');
+        post.className = 'Grid-cell Post u-xs-size12of12 u-size10of12 u-lg-size12of12';
+        post.style.borderColor = '#f50541';
+        const postHeader = document.createElement('div');
+        postHeader.className = 'post-header Post-headerContent';
+        postHeader.style.backgroundColor = '#f50541';
+        const headerInner = document.createElement('div');
+        const anchor = document.createElement('a');
+        anchor.href = '#note-0';
+        anchor.className = 'anchor post-anchor';
+        anchor.textContent = '#0';
+        const address = document.createElement('div');
+        address.className = 'Post-address';
+        const author = document.createElement('span');
+        author.className = 'post-author';
+        author.textContent = 'Zadání';
+        const postContent = document.createElement('div');
+        postContent.className = 'Post-content';
+        const content = document.createElement('div');
+        content.className = 'ck-content';
+        content.id = 'commentText-0';
+        content.appendChild(sanitizeHtmlFragment(descContent));
+
+        address.appendChild(author);
+        headerInner.append(anchor, address);
+        postHeader.appendChild(headerInner);
+        postContent.appendChild(content);
+        post.append(postHeader, postContent);
+        grid.appendChild(post);
+        newComment.appendChild(grid);
 
         const discussDiv = document.getElementById('discuss');
         if (discussDiv) discussDiv.appendChild(newComment);
@@ -918,19 +1420,29 @@
         const match = dateStr.match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\s+(\d{2}):(\d{2})/);
         if (!match) return null;
         const [, day, month, year, hour, minute] = match;
-        return new Date(year, month - 1, day, hour, minute);
+        const date = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
+        if (
+            date.getFullYear() !== Number(year)
+            || date.getMonth() !== Number(month) - 1
+            || date.getDate() !== Number(day)
+            || date.getHours() !== Number(hour)
+            || date.getMinutes() !== Number(minute)
+        ) {
+            return null;
+        }
+        return date;
     }
 
     function handleVisitTracking(id) {
         const now = new Date();
         const lastVisitKey = `PBS_lastVisit_${id}`;
-        const lastVisit = localStorage.getItem(lastVisitKey);
-        localStorage.setItem(lastVisitKey, now.getTime().toString());
+        const lastVisit = safeGetStorageItem(lastVisitKey);
+        safeSetStorageItem(lastVisitKey, now.getTime().toString());
 
         if (!lastVisit) return 0;
 
         const comments = document.querySelectorAll('.post.js-note-post');
-        const lastVisitTime = parseInt(lastVisit);
+        const lastVisitTime = parseInt(lastVisit, 10);
         const discussDiv = document.getElementById('discuss');
 
         for (const comment of comments) {
@@ -1007,29 +1519,62 @@
                 toggleLink.remove();
             });
 
-            notepad.parentNode.insertBefore(toggleLink, notepad);
+            notepad.parentNode?.insertBefore(toggleLink, notepad);
         }, 250);
     }
 
-    function improveFiles(){
-        const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'];
-        const iconMap = {
-            pdf: 'fa-file-pdf',
-            doc: 'fa-file-word',
-            docx: 'fa-file-word',
-            xls: 'fa-file-excel',
-            xlsx: 'fa-file-excel',
-            zip: 'fa-file-zipper',
-            txt: 'fa-file-text',
-            csv: 'fa-file-csv',
-        };
+    function createFilePreview(href, filename, status = '') {
+        const safeHref = getSafeUrl(href);
+        if (!safeHref) return null;
 
-        if (!document.querySelector('link[href*="font-awesome"]')) {
-            const link = document.createElement('link');
-            link.rel = 'stylesheet';
-            link.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css';
-            document.head.appendChild(link);
+        const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp']);
+        const extension = (filename.split('.').pop() || '').toLowerCase();
+        const wrapper = document.createElement('div');
+        wrapper.style.cssText = 'display: flex; gap: 1rem; align-items: center; min-width: 0;';
+
+        if (imageExtensions.has(extension)) {
+            const imageLink = document.createElement('a');
+            imageLink.href = safeHref;
+            imageLink.target = '_blank';
+            imageLink.rel = 'noopener noreferrer';
+            imageLink.className = 'progressName';
+            const image = document.createElement('img');
+            image.src = safeHref;
+            image.alt = filename;
+            image.loading = 'lazy';
+            image.style.cssText = 'max-width: 250px; width: 100%; height: 150px; object-fit: contain; border: 1px solid #ccc; border-radius: 4px;';
+            imageLink.appendChild(image);
+            wrapper.appendChild(imageLink);
+        } else {
+            const icon = document.createElement('span');
+            icon.textContent = '📄';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.style.cssText = 'font-size: 2rem; flex: 0 0 auto;';
+            wrapper.appendChild(icon);
         }
+
+        const details = document.createElement('div');
+        details.style.cssText = 'min-width: 0; overflow-wrap: anywhere;';
+        const downloadLink = document.createElement('a');
+        downloadLink.href = safeHref;
+        downloadLink.download = filename;
+        downloadLink.className = 'progressName';
+        downloadLink.textContent = filename;
+        downloadLink.style.color = '#9f1607';
+        details.appendChild(downloadLink);
+
+        if (status) {
+            const statusLine = document.createElement('div');
+            statusLine.textContent = status;
+            statusLine.style.cssText = 'font-size: 0.875rem; color: #666; margin-block: 0.5rem;';
+            details.appendChild(statusLine);
+        }
+
+        wrapper.appendChild(details);
+        return wrapper;
+    }
+
+    function improveFiles(){
 
         const heading = Array.from(document.querySelectorAll('label')).find(
             label =>
@@ -1054,56 +1599,20 @@
             if (!link) return;
 
             const href = link.getAttribute('href');
-            const filename = link.textContent;
-            const status = container.querySelector('.progressBarStatus').textContent;
-            const ext = filename.split('.').pop().toLowerCase();
+            const filename = normalizeText(link.textContent) || 'Soubor';
+            const status = normalizeText(container.querySelector('.progressBarStatus')?.textContent);
+            const preview = createFilePreview(href, filename, status);
+            if (!preview) return;
 
             container.className = '';
             container.style.border = '1px solid lightgrey';
             container.style.padding = '10px';
             container.style.marginBottom = '5px';
-
-            if (imageExtensions.includes(ext)) {
-                container.innerHTML = `
-        <div style="display: flex; gap: 1rem;">
-          <a href="${href}" target="_blank" class="progressName" style="color: #c81b08;">
-            <img src="${href}" alt="${filename}" style="max-width: 250px; height: 150px; object-fit: scale-down; border:1px solid #cccccc; border-radius: 4px;">
-          </a>
-          <div>
-            <div><a href="${href}" target="_blank" class="progressName" style="color: #c81b08;">${filename}</a></div>
-            <div style="font-size: 0.875rem; color: #666; margin: 0.5rem 0;">${status}</div>
-            <a href="${href}" download="${filename}" class="btn btn-success">Stáhnout</a>
-          </div>
-        </div>
-      `;
-            } else {
-                const icon = iconMap[ext] || 'fa-file';
-                container.innerHTML = `
-        <div style="display: flex; gap: 1rem; align-items: center;">
-          <i class="fa-solid ${icon}" style="font-size: 2rem; color: #c81b08;"></i>
-          <div>
-            <a href="${href}" download="${filename}" class="progressName" style="color: #c81b08;">${filename}</a>
-            <div style="font-size: 0.875rem; color: #666; margin: 0.5rem 0;">${status}</div>
-          </div>
-        </div>
-      `;
-            }
+            container.replaceChildren(preview);
         });
     }
 
     function attachFilesToComments(){
-        const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'];
-        const iconMap = {
-            pdf: 'fa-file-pdf',
-            doc: 'fa-file-word',
-            docx: 'fa-file-word',
-            xls: 'fa-file-excel',
-            xlsx: 'fa-file-excel',
-            zip: 'fa-file-zipper',
-            txt: 'fa-file-text',
-            csv: 'fa-file-csv',
-        };
-
         const filesData = [];
 
         document.querySelectorAll('.progressContainer').forEach(container => {
@@ -1111,7 +1620,7 @@
             if (!link) return;
 
             const href = link.getAttribute('href');
-            const filename = link.textContent;
+            const filename = normalizeText(link.textContent) || 'Soubor';
             const statusText = container.querySelector('.progressBarStatus')?.textContent || '';
 
             const timeMatch = statusText.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2})/);
@@ -1147,115 +1656,16 @@
 
             fileData.used = true;
 
-            const ext = fileData.filename.split('.').pop().toLowerCase();
-            let fileHtml = '';
-
-            if (imageExtensions.includes(ext)) {
-                fileHtml = `
-                <div style="display: flex; gap: 1rem;">
-                    <a href="${fileData.href}" target="_blank" class="progressName" style="color: #c81b08;">
-                        <img src="${fileData.href}" alt="${fileData.filename}" style="max-width: 250px; height: 150px; object-fit: scale-down; border:1px solid #cccccc; border-radius: 4px;">
-                    </a>
-                    <div>
-                        <div><a href="${fileData.href}" target="_blank" class="progressName" style="color: #c81b08;">${fileData.filename}</a></div>
-                        <a href="${fileData.href}" download="${fileData.filename}" class="btn btn-success">Stáhnout</a>
-                    </div>
-                </div>
-            `;
-            } else {
-                const icon = iconMap[ext] || 'fa-file';
-                fileHtml = `
-                <div style="display: flex; gap: 1rem; align-items: center;">
-                    <i class="fa-solid ${icon}" style="font-size: 2rem; color: #c81b08;"></i>
-                    <div>
-                        <a href="${fileData.href}" download="${fileData.filename}" class="progressName" style="color: #c81b08;">${fileData.filename}</a>
-                    </div>
-                </div>
-            `;
-            }
-
             const fileDiv = document.createElement('div');
             fileDiv.style.padding = '10px';
             fileDiv.style.marginTop = '10px';
-            fileDiv.innerHTML = fileHtml;
+            const preview = createFilePreview(fileData.href, fileData.filename);
+            if (!preview) return;
+            fileDiv.appendChild(preview);
 
-            contentDiv.parentNode.insertBefore(fileDiv, contentDiv.nextSibling);
+            contentDiv.parentNode?.insertBefore(fileDiv, contentDiv.nextSibling);
         });
     }
-    function mixTimeAndRequests(){
-        const myName = document.querySelector("#head > div > nav > div.Navigation-userBar.UserBar.js-navigation-userbar > div > a > span > strong")?.textContent.trim();
-        if (!myName) return;
-
-        const items = [];
-        const myTimeTexts = [];
-
-        document.querySelectorAll('#overtim .timr').forEach(el => {
-            const time = el.querySelector('.timrc')?.textContent.trim();
-            const date = el.querySelector('.timrd')?.textContent.trim();
-            const description = el.querySelector('.timrds')?.textContent.trim();
-
-            if (time && date && description) {
-                myTimeTexts.push(description);
-                const dateObj = new Date(date.replace(' ', ' '));
-                items.push({
-                    time,
-                    date,
-                    description,
-                    type: 'myTime',
-                    dateObj,
-                    element: el
-                });
-            }
-        });
-
-        document.querySelectorAll('#othth').forEach(heading => {
-            if (heading.textContent.includes('Žádosti')) {
-                let current = heading.nextElementSibling;
-                while (current && !current.id) {
-                    if (current.classList.contains('timr')) {
-                        const time = current.querySelector('.timrc')?.textContent.trim();
-                        const date = current.querySelector('.timrd')?.textContent.trim();
-                        const person = current.querySelector('.timru')?.textContent.trim();
-                        const descEls = current.querySelectorAll('.timrds');
-                        const description = descEls[0]?.textContent.trim();
-                        const status = descEls[1]?.textContent.trim();
-
-                        if (person?.includes(myName) && time && date && description && !myTimeTexts.includes(description)) {
-                            const dateObj = new Date(date.replace(' ', ' '));
-                            items.push({
-                                time,
-                                date,
-                                description,
-                                status,
-                                type: 'request',
-                                dateObj,
-                                element: current
-                            });
-                        }
-                    }
-                    current = current.nextElementSibling;
-                }
-            }
-        });
-
-        items.sort((a, b) => b.dateObj - a.dateObj);
-
-        const container = document.querySelector('#overtim');
-        container.innerHTML = '';
-
-        items.forEach(item => {
-            const clone = item.element.cloneNode(true);
-
-            if (item.type === 'request') {
-                const borderColor = item.status?.includes('Schváleno') ? '#4CAF50' : '#FF9800';
-                clone.style.borderLeft = `4px solid ${borderColor}`;
-                clone.style.paddingLeft = '10px';
-            }
-
-            container.appendChild(clone);
-        });
-    }
-
     function addBodyStyles(){
         const body = document.getElementById('body');
         if (body) {
@@ -1298,25 +1708,23 @@
             element.style.filter = 'drop-shadow(0px 0px 4px grey)';
             element.style.marginTop = '-3px';
         });
-        document.getElementById("environment").remove();
+        document.getElementById("environment")?.remove();
         document.querySelectorAll("#head > div > nav > div.Navigation-userBar.UserBar.js-navigation-userbar > div > a > span > small:nth-child(2)").forEach(element => {
             element.style.float= "left";
             element.style.color= "black";
-            element.style.marginRight= "3px;";
+            element.style.marginRight = "3px";
         });
 
-
+        let scrollFrame = null;
         window.addEventListener('scroll', () => {
-            const currentScroll = window.pageYOffset || document.documentElement.scrollTop;
-
-            if (currentScroll > lastScrollTop) {
-                head.style.transform = 'translateY(-100%)';
-            } else {
-                head.style.transform = 'translateY(0)';
-            }
-
-            lastScrollTop = currentScroll <= 0 ? 0 : currentScroll;
-        });
+            if (scrollFrame !== null) return;
+            scrollFrame = window.requestAnimationFrame(() => {
+                const currentScroll = window.pageYOffset || document.documentElement.scrollTop;
+                head.style.transform = currentScroll > lastScrollTop ? 'translateY(-100%)' : 'translateY(0)';
+                lastScrollTop = Math.max(0, currentScroll);
+                scrollFrame = null;
+            });
+        }, { passive: true });
     }
 
     function hideSystemComments(){
@@ -1324,9 +1732,7 @@
             const content = comment.querySelector('.ck-content');
             if (!content) return;
 
-            const text = content.innerHTML.trim();
-
-            if (isSystemCommentContent(text)) {
+            if (isSystemCommentContent(content)) {
                 //   comment.style.display = 'none';
                 comment.style.transform = "scale(0.5)";
                 comment.style.opacity = '0.3';
@@ -1348,16 +1754,15 @@
     function init() {
         if (checkPostRequest()) return;
         if (handlePathRedirect()) return;
+        if (!isTaskDetailUrl()) return;
 
         const data = extractTableData();
         if (!data) return;
 
-        const nameSlug = createSlug(data.name);
-        const h2 = setupHeader(data.name, data.id, data.client, nameSlug);
-
-        if (h2) {
-            //  setupUrlContainers(h2, data, nameSlug);
-        }
+        const customName = getCustomTaskName(data.id);
+        const displayName = customName || data.name;
+        const nameSlug = createSlug(displayName);
+        setupHeader(data.name, data.id, data.client);
 
         cleanupElements();
         handleDescriptionContent();
@@ -1365,7 +1770,8 @@
         updateUrlParams(nameSlug, data.client, data.id);
         const currentTaskMeta = {
             id: data.id,
-            name: data.name,
+            name: displayName,
+            originalName: data.name,
             client: data.client,
             url: buildParamUrl(nameSlug, data.id, data.client)
         };
@@ -1376,11 +1782,11 @@
         attachFilesToComments();
         improveFiles();
         checkStarredTasksForUpdates();
-        //mixTimeAndRequests();
 
         addBodyStyles();
         initHeaderScroll();
         hideSystemComments();
+        trackPostSubmissions();
     }
 
     init();

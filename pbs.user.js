@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.1
+// @version      0.3.2
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -130,18 +130,23 @@
         const table = findTaskDetailTable(doc);
         if (!table) return null;
 
-        const data = { name: '', id: '', client: '' };
+        const data = { name: '', id: '', client: '', completed: false };
         const rows = table.querySelectorAll('tbody tr');
 
         for (const row of rows) {
             const th = row.querySelector('th');
             if (!th) continue;
-            const td = row.querySelector('td');
-            if (!td) continue;
+            const valueCell = th.nextElementSibling || row.querySelector('td');
+            if (!valueCell) continue;
 
-            if (th.textContent.includes('Název:')) data.name = td.textContent.trim();
-            if (th.textContent.trim() === 'ID:') data.id = td.textContent.trim();
-            if (th.textContent.includes('Zákazník:')) data.client = td.textContent.trim();
+            const label = normalizeText(th.textContent);
+            const value = normalizeText(valueCell.textContent);
+            if (label.includes('Název:')) data.name = value;
+            if (label === 'ID:') data.id = value;
+            if (label.includes('Zákazník:')) data.client = value;
+            if (label.toLocaleLowerCase('cs') === 'status:') {
+                data.completed = value.toLocaleLowerCase('cs').includes('ukončený');
+            }
         }
 
         if (!data.name || !data.id) return null;
@@ -842,15 +847,7 @@
     }
 
     function isTaskCompletedInDocument(doc) {
-        const table = findTaskDetailTable(doc);
-        if (!table) return false;
-        const statusRow = Array.from(table.querySelectorAll('tr')).find(row => {
-            const header = row.querySelector('th');
-            return normalizeText(header?.textContent).toLocaleLowerCase('cs') === 'status:';
-        });
-        const statusHeader = statusRow?.querySelector('th');
-        const statusCell = statusHeader?.nextElementSibling;
-        return normalizeText(statusCell?.textContent).toLocaleLowerCase('cs') === 'ukončený';
+        return Boolean(extractTableData(doc, false)?.completed);
     }
 
     function formatTimestamp(timestamp) {
@@ -924,18 +921,16 @@
         return true;
     }
 
-    function setVisitedTaskCompletion(task, completed) {
+    function updateVisitedTaskFromCheck(task, updates) {
         if (!task?.id) return;
         const tasks = readVisitedTasks();
         const index = tasks.findIndex(item => String(item.id) === String(task.id));
-        if (index < 0 && !completed) return;
-
         const currentTask = index >= 0 ? tasks[index] : task;
         const updatedTask = {
             ...currentTask,
-            completed: Boolean(completed)
+            ...updates
         };
-        if (completed) {
+        if (updatedTask.completed) {
             updatedTask.completedAt = Date.now();
         } else {
             delete updatedTask.completedAt;
@@ -949,8 +944,14 @@
         writeVisitedTasks(tasks);
     }
 
-    async function checkStarredTasksForUpdates() {
-        const tasks = normalizeStarredTasks();
+    async function checkTasksForUpdates() {
+        const starredTasks = normalizeStarredTasks();
+        const taskCandidates = readTaskListMode() === TASK_LIST_MODE_VISITED
+            ? getTasksForActiveMode()
+            : starredTasks;
+        const tasks = Array.from(
+            new Map(taskCandidates.map(task => [String(task.id || task.url || ''), task])).values()
+        ).filter(task => task.id);
         if (tasks.length === 0) return;
 
         const now = Date.now();
@@ -965,11 +966,10 @@
                 continue;
             }
             const lastVisitKey = `PBS_lastVisit_${task.id}`;
-            const lastCheckKey = `PBS_lastCheck_${task.id}`;
+            const lastCheckKey = `PBS_lastCheck_v2_${task.id}`;
             const lastVisit = parseInt(safeGetStorageItem(lastVisitKey) || '0', 10);
             const lastCheck = parseInt(safeGetStorageItem(lastCheckKey) || '0', 10);
             if (lastCheck && now - lastCheck < TASK_CHECK_INTERVAL_MS) continue;
-            if (!readStarredTasks().some(item => String(item.id) === taskId)) continue;
 
             const controller = new AbortController();
             const timeoutId = window.setTimeout(() => controller.abort(), TASK_CHECK_TIMEOUT_MS);
@@ -1011,7 +1011,16 @@
                     currentTask.completed = isCompleted;
                     return currentTask;
                 });
-                setVisitedTaskCompletion(task, isCompleted);
+                const visitedUpdates = {
+                    approvedTimeMinutes: approvedMinutes,
+                    completed: isCompleted
+                };
+                if (latestInfo) {
+                    visitedUpdates.lastPostTime = latestInfo.time;
+                    visitedUpdates.lastPostAuthor = latestInfo.author;
+                    visitedUpdates.lastPostText = trimText(latestInfo.text, 500);
+                }
+                updateVisitedTaskFromCheck(task, visitedUpdates);
                 if (isCompleted) {
                     console.log(`PBS check ${getTaskDisplayName(task)}: task completed`);
                 }
@@ -1819,7 +1828,7 @@
         hideNotes();
         attachFilesToComments();
         improveFiles();
-        checkStarredTasksForUpdates();
+        checkTasksForUpdates();
 
         addBodyStyles();
         initHeaderScroll();

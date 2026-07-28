@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.5
+// @version      0.3.6
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -1216,7 +1216,9 @@
                 'display: flex',
                 'align-items: flex-start',
                 'gap: 8px',
-                'min-width: 0'
+                'min-width: 0',
+                'position: relative',
+                'left: -40px'
             ].join(';');
             h2.textContent = '';
 
@@ -1239,7 +1241,9 @@
                 'font-size: 28px',
                 'line-height: 1',
                 'color: #f2c200',
-                'margin-top: 1px'
+                'margin-top: 1px',
+                'position: relative',
+                'left: 10px'
             ].join(';');
             h2.appendChild(starToggle);
 

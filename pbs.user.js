@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.3
+// @version      0.3.5
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -134,19 +134,19 @@
         const rows = table.querySelectorAll('tbody tr');
 
         for (const row of rows) {
-            const th = row.querySelector('th');
-            if (!th) continue;
-            const valueCell = th.nextElementSibling || row.querySelector('td');
-            if (!valueCell) continue;
+            for (const th of row.querySelectorAll('th')) {
+                const valueCell = th.nextElementSibling;
+                if (!valueCell || !/^(TH|TD)$/.test(valueCell.tagName)) continue;
 
-            const label = normalizeText(th.textContent);
-            const value = normalizeText(valueCell.textContent);
-            if (label.includes('Název:')) data.name = value;
-            if (label === 'ID:') data.id = value;
-            if (label.includes('Zákazník:')) data.client = value;
-            if (label.toLocaleLowerCase('cs') === 'status:') {
-                data.status = value;
-                data.completed = value.toLocaleLowerCase('cs').includes('ukončený');
+                const label = normalizeText(th.textContent);
+                const value = normalizeText(valueCell.textContent);
+                if (label.includes('Název:')) data.name = value;
+                if (label === 'ID:') data.id = value;
+                if (label.includes('Zákazník:')) data.client = value;
+                if (label.toLocaleLowerCase('cs') === 'status:') {
+                    data.status = value;
+                    data.completed = value.toLocaleLowerCase('cs').includes('ukončený');
+                }
             }
         }
 
@@ -981,7 +981,7 @@
                 continue;
             }
             const lastVisitKey = `PBS_lastVisit_${task.id}`;
-            const lastCheckKey = `PBS_lastCheck_v2_${task.id}`;
+            const lastCheckKey = `PBS_lastCheck_v3_${task.id}`;
             const lastVisit = parseInt(safeGetStorageItem(lastVisitKey) || '0', 10);
             const lastCheck = parseInt(safeGetStorageItem(lastCheckKey) || '0', 10);
             if (lastCheck && now - lastCheck < TASK_CHECK_INTERVAL_MS) continue;
@@ -1211,7 +1211,13 @@
 
         if (h2) {
             h2.className = 'u-text--red';
-            h2.style.margin = '20px 10px';
+            h2.style.cssText = [
+                'margin: 20px 10px',
+                'display: flex',
+                'align-items: flex-start',
+                'gap: 8px',
+                'min-width: 0'
+            ].join(';');
             h2.textContent = '';
 
             const starToggle = document.createElement('button');
@@ -1219,13 +1225,36 @@
             starToggle.id = 'pbs-star-toggle';
             starToggle.className = 'pbs-control';
             starToggle.setAttribute('aria-label', 'Sledovat úkol');
-            starToggle.style.cssText = 'cursor:pointer;border:0;background:transparent;padding:0;font-size:26px;color:#f2c200;position:absolute;inset-inline-start:25px;top:23px;';
+            starToggle.style.cssText = [
+                'cursor: pointer',
+                'border: 0',
+                'background: transparent',
+                'padding: 0',
+                'width: 32px',
+                'height: 32px',
+                'display: inline-flex',
+                'align-items: center',
+                'justify-content: center',
+                'flex: 0 0 32px',
+                'font-size: 28px',
+                'line-height: 1',
+                'color: #f2c200',
+                'margin-top: 1px'
+            ].join(';');
             h2.appendChild(starToggle);
+
+            const headingContent = document.createElement('div');
+            headingContent.style.cssText = 'flex: 1 1 auto; min-width: 0;';
+            h2.appendChild(headingContent);
+
+            const nameLine = document.createElement('div');
+            nameLine.style.cssText = 'display: flex; align-items: center; gap: 4px; min-width: 0; min-height: 34px; flex-wrap: wrap;';
+            headingContent.appendChild(nameLine);
 
             const nameText = document.createElement('span');
             nameText.id = 'pbs-task-name';
-            nameText.style.overflowWrap = 'anywhere';
-            h2.appendChild(nameText);
+            nameText.style.cssText = 'min-width: 0; overflow-wrap: anywhere; line-height: 1.15;';
+            nameLine.appendChild(nameText);
 
             const renameButton = document.createElement('button');
             renameButton.type = 'button';
@@ -1234,7 +1263,7 @@
             renameButton.title = 'Přejmenovat úkol';
             renameButton.setAttribute('aria-label', renameButton.title);
             renameButton.style.cssText = 'border:0;background:transparent;color:#888;cursor:pointer;font-size:16px;padding:0 5px;';
-            h2.appendChild(renameButton);
+            nameLine.appendChild(renameButton);
 
             const quickCopy = document.createElement('button');
             quickCopy.type = 'button';
@@ -1244,22 +1273,25 @@
             quickCopy.title = 'Kopírovat URL';
             quickCopy.setAttribute('aria-label', quickCopy.title);
             quickCopy.textContent = '🔗';
-            h2.appendChild(quickCopy);
-
-            const taskMeta = document.createElement('span');
-            taskMeta.style.cssText = 'font-size: smaller; float: right;';
-            taskMeta.textContent = `${client} #${id}`;
-            h2.appendChild(taskMeta);
+            nameLine.appendChild(quickCopy);
 
             const originalNameLine = document.createElement('div');
             originalNameLine.id = 'pbs-original-task-name';
-            originalNameLine.style.cssText = 'font-size: 11px; color: #888; font-weight: normal; margin-top: 2px;';
-            h2.after(originalNameLine);
+            originalNameLine.style.cssText = 'font-size:11px;color:#888;font-weight:normal;margin-top:2px;display:flex;align-items:center;gap:4px;line-height:1.3;';
+            headingContent.appendChild(originalNameLine);
 
             const resetButton = document.createElement('button');
             resetButton.type = 'button';
-            resetButton.textContent = 'Obnovit původní název';
-            resetButton.style.cssText = 'border:0;background:transparent;color:#888;text-decoration:underline;cursor:pointer;font-size:11px;padding:0 0 0 6px;';
+            resetButton.className = 'pbs-control';
+            resetButton.textContent = '↺';
+            resetButton.title = 'Obnovit původní název';
+            resetButton.setAttribute('aria-label', resetButton.title);
+            resetButton.style.cssText = 'border:0;background:transparent;color:#777;cursor:pointer;font-size:15px;line-height:1;padding:1px 2px;';
+
+            const taskMeta = document.createElement('span');
+            taskMeta.style.cssText = 'font-size:smaller;white-space:nowrap;flex:0 0 auto;line-height:34px;';
+            taskMeta.textContent = `${client} #${id}`;
+            h2.appendChild(taskMeta);
 
             const getParamUrl = () => buildParamUrl(createSlug(displayName), id, client);
 
@@ -1268,9 +1300,9 @@
                 displayName = customName || originalName;
                 nameText.textContent = displayName;
                 originalNameLine.textContent = '';
-                originalNameLine.style.display = customName ? 'block' : 'none';
+                originalNameLine.style.display = customName ? 'flex' : 'none';
                 if (customName) {
-                    originalNameLine.append(`Původní název: ${originalName}`);
+                    originalNameLine.append(originalName);
                     originalNameLine.appendChild(resetButton);
                 }
                 updateUrlParams(createSlug(displayName), client, id);

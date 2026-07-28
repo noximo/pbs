@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.2
+// @version      0.3.3
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -130,7 +130,7 @@
         const table = findTaskDetailTable(doc);
         if (!table) return null;
 
-        const data = { name: '', id: '', client: '', completed: false };
+        const data = { name: '', id: '', client: '', status: '', completed: false };
         const rows = table.querySelectorAll('tbody tr');
 
         for (const row of rows) {
@@ -145,6 +145,7 @@
             if (label === 'ID:') data.id = value;
             if (label.includes('Zákazník:')) data.client = value;
             if (label.toLocaleLowerCase('cs') === 'status:') {
+                data.status = value;
                 data.completed = value.toLocaleLowerCase('cs').includes('ukončený');
             }
         }
@@ -909,20 +910,25 @@
     function updateStarredTaskById(id, updater) {
         const tasks = readStarredTasks();
         const index = tasks.findIndex(task => String(task.id) === String(id));
-        if (index < 0) return false;
+        if (index < 0) return { found: false, changed: false };
 
-        const updatedTask = updater({ ...tasks[index] });
+        const originalTask = tasks[index];
+        const updatedTask = updater({ ...originalTask });
+        const changed = updatedTask === null
+            || JSON.stringify(originalTask) !== JSON.stringify(updatedTask);
+        if (!changed) return { found: true, changed: false };
+
         if (updatedTask === null) {
             tasks.splice(index, 1);
         } else {
             tasks[index] = updatedTask;
         }
         writeStarredTasks(tasks);
-        return true;
+        return { found: true, changed: true };
     }
 
     function updateVisitedTaskFromCheck(task, updates) {
-        if (!task?.id) return;
+        if (!task?.id) return { found: false, created: false, changed: false };
         const tasks = readVisitedTasks();
         const index = tasks.findIndex(item => String(item.id) === String(task.id));
         const currentTask = index >= 0 ? tasks[index] : task;
@@ -931,10 +937,12 @@
             ...updates
         };
         if (updatedTask.completed) {
-            updatedTask.completedAt = Date.now();
+            updatedTask.completedAt = currentTask.completedAt || Date.now();
         } else {
             delete updatedTask.completedAt;
         }
+        const changed = index < 0 || JSON.stringify(currentTask) !== JSON.stringify(updatedTask);
+        if (!changed) return { found: true, created: false, changed: false };
 
         if (index >= 0) {
             tasks[index] = updatedTask;
@@ -942,6 +950,13 @@
             tasks.push(updatedTask);
         }
         writeVisitedTasks(tasks);
+        return { found: index >= 0, created: index < 0, changed: true };
+    }
+
+    function describeStorageUpdate(result) {
+        if (result.created) return 'created';
+        if (!result.found) return 'missing';
+        return result.changed ? 'updated' : 'unchanged';
     }
 
     async function checkTasksForUpdates() {
@@ -991,16 +1006,14 @@
                     throw new Error('Server nevrátil očekávaný detail úkolu. Možná vypršelo přihlášení.');
                 }
 
-                const isCompleted = isTaskCompletedInDocument(doc);
+                const isCompleted = fetchedTask.completed;
                 const latestInfo = getLastPostInfoFromDocument(doc);
                 const latestTime = latestInfo ? latestInfo.time : 0;
                 const lastLog = latestInfo
                     ? `${latestInfo.author} @ ${formatTimestamp(latestInfo.time)}`
                     : 'no posts';
-                console.log(`PBS check ${getTaskDisplayName(task)}: ${lastLog}`);
-
                 const approvedMinutes = getApprovedUniqueTimeFromDocument(doc);
-                updateStarredTaskById(taskId, currentTask => {
+                const starredUpdate = updateStarredTaskById(taskId, currentTask => {
                     if (latestInfo) {
                         currentTask.lastPostTime = latestInfo.time;
                         currentTask.lastPostAuthor = latestInfo.author;
@@ -1020,10 +1033,16 @@
                     visitedUpdates.lastPostAuthor = latestInfo.author;
                     visitedUpdates.lastPostText = trimText(latestInfo.text, 500);
                 }
-                updateVisitedTaskFromCheck(task, visitedUpdates);
-                if (isCompleted) {
-                    console.log(`PBS check ${getTaskDisplayName(task)}: task completed`);
-                }
+                const visitedUpdate = updateVisitedTaskFromCheck(task, visitedUpdates);
+                console.info(`PBS check ${getTaskDisplayName(task)} (#${taskId})`, {
+                    fetched: true,
+                    statusText: fetchedTask.status || '(missing)',
+                    completed: isCompleted,
+                    lastPost: lastLog,
+                    approvedTimeMinutes: approvedMinutes,
+                    starredRecord: describeStorageUpdate(starredUpdate),
+                    visitedRecord: describeStorageUpdate(visitedUpdate)
+                });
                 safeSetStorageItem(lastCheckKey, String(Date.now()));
             } catch (error) {
                 const message = error.name === 'AbortError'

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.14
+// @version      0.3.15
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -355,6 +355,32 @@
             }
             #pbs-starred-panel::-webkit-scrollbar-thumb:hover {
                 background-color: rgba(0, 0, 0, 0.4);
+            }
+            @media (min-width: 761px) and (max-width: 1320px) and (hover: hover) and (pointer: fine) {
+                #pbs-starred-panel {
+                    transform: translateX(calc(-100% + 28px));
+                    transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+                }
+                #pbs-starred-panel:hover,
+                #pbs-starred-panel:focus-within {
+                    transform: translateX(0);
+                }
+                #pbs-starred-panel::after {
+                    content: '›';
+                    position: absolute;
+                    inset-inline-end: 7px;
+                    inset-block-start: 50%;
+                    color: rgba(0, 0, 0, 0.42);
+                    font-size: 21px;
+                    line-height: 1;
+                    pointer-events: none;
+                    transform: translateY(-50%);
+                    transition: opacity 0.15s ease-out;
+                }
+                #pbs-starred-panel:hover::after,
+                #pbs-starred-panel:focus-within::after {
+                    opacity: 0;
+                }
             }
             @media (max-width: 760px) {
                 #pbs-starred-panel {

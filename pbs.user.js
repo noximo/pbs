@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.6
+// @version      0.3.7
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -196,25 +196,12 @@
         }
     }
 
-    const TASK_LIST_MODE_KEY = 'PBS_task_list_mode';
-    const TASK_LIST_MODE_STARRED = 'starred';
-    const TASK_LIST_MODE_VISITED = 'visited';
     const VISITED_TASKS_KEY = 'PBS_visited_tasks';
     const TASK_LIST_COLLAPSED_KEY = 'PBS_task_list_collapsed';
     const CUSTOM_TASK_NAMES_KEY = 'PBS_custom_task_names';
 
     function writeStarredTasks(tasks) {
         safeSetStorageItem(STARRED_TASKS_KEY, JSON.stringify(tasks));
-    }
-
-    function readTaskListMode() {
-        const stored = safeGetStorageItem(TASK_LIST_MODE_KEY);
-        return stored === TASK_LIST_MODE_VISITED ? TASK_LIST_MODE_VISITED : TASK_LIST_MODE_STARRED;
-    }
-
-    function writeTaskListMode(mode) {
-        const value = mode === TASK_LIST_MODE_VISITED ? TASK_LIST_MODE_VISITED : TASK_LIST_MODE_STARRED;
-        safeSetStorageItem(TASK_LIST_MODE_KEY, value);
     }
 
     function readVisitedTasks() {
@@ -362,11 +349,9 @@
                 outline-offset: 2px;
                 border-radius: 2px;
             }
-            @media (max-width: 560px) {
+            @media (max-width: 760px) {
                 #pbs-starred-panel {
-                    inset-inline: 8px !important;
-                    bottom: 8px !important;
-                    max-width: none !important;
+                    width: 100vw !important;
                     font-size: 14px !important;
                 }
             }
@@ -374,10 +359,11 @@
         document.head.appendChild(style);
     }
 
-    function getTaskListTitle() {
-        return readTaskListMode() === TASK_LIST_MODE_VISITED
-            ? 'Navštívené úkoly'
-            : 'Sledované úkoly';
+    function getTaskActivityTime(task) {
+        return Math.max(
+            Number(task?.lastVisitedAt || getLastVisitTimeForTask(task) || 0),
+            Number(task?.lastPostTime || 0)
+        );
     }
 
     function ensureStarredTasksPanel() {
@@ -387,100 +373,29 @@
 
         panel = document.createElement('div');
         panel.id = 'pbs-starred-panel';
+        panel.setAttribute('aria-label', 'Přehled úkolů');
+        panel.setAttribute('role', 'complementary');
         panel.style.cssText = [
             'position: fixed',
-            'right: 16px',
-            'bottom: 16px',
+            'inset-inline-start: 0',
+            'inset-block-end: 0',
             'z-index: 9999',
-            'background: rgba(255,255,255,0.95)',
-            'border: 1px solid #ddd',
-            'border-radius: 8px',
-            'box-shadow: 0 6px 20px rgba(0,0,0,0.12)',
-            'padding: 10px 12px',
+            'width: 300px',
+            'box-sizing: border-box',
+            'background: #fff',
+            'border-inline-end: 1px solid #ddd',
+            'padding: 12px',
             'text-align: left',
             'line-height: 1.5em',
             'font-size: 13px',
-            'max-width: 260px',
-            'max-height: 50vh',
             'overflow: auto'
         ].join(';');
 
-        const header = document.createElement('div');
-        header.id = 'pbs-task-list-header';
-        header.className = 'pbs-control';
-        header.tabIndex = 0;
-        header.setAttribute('role', 'button');
-        header.setAttribute('aria-controls', 'pbs-starred-list');
-        header.setAttribute('aria-expanded', String(!isTaskListCollapsed()));
-        header.style.cssText = [
-            'display: flex',
-            'align-items: center',
-            'justify-content: space-between',
-            'gap: 8px',
-            'margin-bottom: 6px',
-            'cursor: pointer'
-        ].join(';');
-
-        const title = document.createElement('div');
-        title.id = 'pbs-task-list-title';
-        title.style.cssText = 'font-weight: 700; color: #333;';
-        header.appendChild(title);
-
-        const viewToggle = document.createElement('a');
-        viewToggle.href = '#';
-        viewToggle.id = 'pbs-task-list-toggle';
-        viewToggle.style.cssText = [
-            'font-size: 11px',
-            'color: #c81b08',
-            'text-decoration: none',
-            'font-weight: 700'
-        ].join(';');
-
-        function updateViewToggleLabel() {
-            const mode = readTaskListMode();
-            viewToggle.textContent = mode === TASK_LIST_MODE_VISITED
-                ? 'Zobrazení: navštívené'
-                : 'Zobrazení: sledované';
-        }
-
-        function updateHeaderLabel() {
-            title.textContent = `${isTaskListCollapsed() ? '▸' : '▾'} ${getTaskListTitle()}`;
-        }
-
-        viewToggle.addEventListener('click', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            const nextMode = readTaskListMode() === TASK_LIST_MODE_VISITED
-                ? TASK_LIST_MODE_STARRED
-                : TASK_LIST_MODE_VISITED;
-            writeTaskListMode(nextMode);
-            updateViewToggleLabel();
-            renderStarredTasks();
-        });
-
-        header.addEventListener('click', () => {
-            writeTaskListCollapsed(!isTaskListCollapsed());
-            renderStarredTasks();
-        });
-        header.addEventListener('keydown', event => {
-            if (event.target !== header) return;
-            if (event.key !== 'Enter' && event.key !== ' ') return;
-            event.preventDefault();
-            writeTaskListCollapsed(!isTaskListCollapsed());
-            renderStarredTasks();
-        });
-
-        updateViewToggleLabel();
-        updateHeaderLabel();
-        header.appendChild(viewToggle);
-        panel.appendChild(header);
-
         const list = document.createElement('div');
         list.id = 'pbs-starred-list';
-        list.style.display = isTaskListCollapsed() ? 'none' : 'block';
         panel.appendChild(list);
 
-        document.body.appendChild(panel);
+        document.body.prepend(panel);
         return panel;
     }
 
@@ -490,14 +405,13 @@
         return value ? parseInt(value, 10) || 0 : 0;
     }
 
-    function getTasksForActiveMode() {
-        const mode = readTaskListMode();
-        const starredTasks = readStarredTasks();
-
-        if (mode === TASK_LIST_MODE_STARRED) {
-            return starredTasks;
-        }
-
+    function getInboxTasks() {
+        const starredTasks = readStarredTasks()
+            .map(task => ({
+                ...task,
+                lastVisitedAt: Number(task.lastVisitedAt || getLastVisitTimeForTask(task) || 0)
+            }))
+            .sort((a, b) => getTaskActivityTime(b) - getTaskActivityTime(a));
         const now = Date.now();
         const weekMs = 7 * 24 * 60 * 60 * 1000;
         const cutoffTime = now - weekMs;
@@ -508,7 +422,7 @@
                 lastVisitedAt: Number(task.lastVisitedAt || getLastVisitTimeForTask(task) || 0)
             }))
             .filter(task => task.lastVisitedAt >= cutoffTime)
-            .sort((a, b) => b.lastVisitedAt - a.lastVisitedAt);
+            .sort((a, b) => getTaskActivityTime(b) - getTaskActivityTime(a));
 
         const nonStarredVisited = recentVisited
             .filter(task => !starredIds.has(String(task.id || '')))
@@ -517,57 +431,70 @@
         return [...starredTasks, ...nonStarredVisited];
     }
 
+    function getInboxCounts(tasks = getInboxTasks()) {
+        return {
+            total: tasks.length,
+            unread: tasks.filter(task => task.hasNew && !task.completed).length
+        };
+    }
+
+    function updateTaskListToggle(tasks) {
+        const toggle = document.getElementById('pbs-task-list-toggle');
+        if (!toggle) return;
+
+        const { total, unread } = getInboxCounts(tasks);
+        const collapsed = isTaskListCollapsed();
+        toggle.replaceChildren();
+
+        const arrow = document.createElement('span');
+        arrow.textContent = collapsed ? '▸' : '▾';
+        arrow.setAttribute('aria-hidden', 'true');
+        toggle.appendChild(arrow);
+
+        if (unread) {
+            const unreadCount = document.createElement('strong');
+            unreadCount.textContent = `(${unread})`;
+            unreadCount.style.fontWeight = '700';
+            toggle.appendChild(unreadCount);
+        }
+
+        const totalCount = document.createElement('span');
+        totalCount.textContent = String(total);
+        toggle.appendChild(totalCount);
+        toggle.title = `${collapsed ? 'Zobrazit' : 'Skrýt'} úkoly${unread ? `, ${unread} nepřečtené` : ''}`;
+        toggle.setAttribute('aria-label', toggle.title);
+        toggle.setAttribute('aria-expanded', String(!collapsed));
+    }
+
+    function positionInboxPanel(panel) {
+        const siteHeader = document.querySelector('#head, header, .Navigation');
+        const headerHeight = Math.ceil(siteHeader?.getBoundingClientRect().height || 64);
+        panel.style.insetBlockStart = `${headerHeight}px`;
+    }
+
     function renderStarredTasks() {
         const panel = ensureStarredTasksPanel();
         const list = panel.querySelector('#pbs-starred-list');
-        const title = panel.querySelector('#pbs-task-list-title');
-        const header = panel.querySelector('#pbs-task-list-header');
-        const tasks = getTasksForActiveMode();
+        const tasks = getInboxTasks();
         const collapsed = isTaskListCollapsed();
 
-        if (title) {
-            title.textContent = `${collapsed ? '▸' : '▾'} ${getTaskListTitle()}`;
-        }
-
-        if (list) {
-            list.style.display = collapsed ? 'none' : 'block';
-        }
-        header?.setAttribute('aria-expanded', String(!collapsed));
+        panel.hidden = collapsed;
+        positionInboxPanel(panel);
+        updateTaskListToggle(tasks);
+        if (collapsed || !list) return;
 
         list.replaceChildren();
         if (tasks.length === 0) {
             const empty = document.createElement('div');
-            empty.textContent = readTaskListMode() === TASK_LIST_MODE_VISITED
-                ? 'Žádné navštívené úkoly'
-                : 'Žádné sledované úkoly';
+            empty.textContent = 'Žádné sledované ani navštívené úkoly';
             empty.style.cssText = 'color: #888;';
             list.appendChild(empty);
             return;
         }
 
-        const sortedTasks = [...tasks].sort((a, b) => {
-            const aVisit = Number(a.lastVisitedAt || getLastVisitTimeForTask(a) || 0);
-            const bVisit = Number(b.lastVisitedAt || getLastVisitTimeForTask(b) || 0);
-            if (bVisit !== aVisit) return bVisit - aVisit;
-            return (b.lastPostTime || 0) - (a.lastPostTime || 0);
-        });
-
-        const byClient = new Map();
         const starredIds = new Set(readStarredTasks().map(task => String(task.id || '')));
 
-        sortedTasks.forEach(task => {
-            const clientName = task.client || 'Neznámý klient';
-            if (!byClient.has(clientName)) byClient.set(clientName, []);
-            byClient.get(clientName).push(task);
-        });
-
-        Array.from(byClient.entries()).forEach(([clientName, clientTasks]) => {
-            const clientHeader = document.createElement('div');
-            clientHeader.textContent = clientName;
-            clientHeader.style.cssText = 'margin-top: 6px; font-weight: 700; color: #333;';
-            list.appendChild(clientHeader);
-
-            clientTasks.forEach(task => {
+        tasks.forEach(task => {
                 const row = document.createElement('div');
                 row.style.cssText = 'margin: 3px 0 6px 0; position: relative; cursor: pointer;';
                 const isCompleted = Boolean(task.completed);
@@ -692,8 +619,7 @@
                     window.location.href = taskUrl;
                 });
 
-                list.appendChild(row);
-            });
+            list.appendChild(row);
         });
     }
 
@@ -960,10 +886,8 @@
     }
 
     async function checkTasksForUpdates() {
-        const starredTasks = normalizeStarredTasks();
-        const taskCandidates = readTaskListMode() === TASK_LIST_MODE_VISITED
-            ? getTasksForActiveMode()
-            : starredTasks;
+        normalizeStarredTasks();
+        const taskCandidates = getInboxTasks();
         const tasks = Array.from(
             new Map(taskCandidates.map(task => [String(task.id || task.url || ''), task])).values()
         ).filter(task => task.id);
@@ -1296,6 +1220,32 @@
             taskMeta.style.cssText = 'font-size:smaller;white-space:nowrap;flex:0 0 auto;line-height:34px;';
             taskMeta.textContent = `${client} #${id}`;
             h2.appendChild(taskMeta);
+
+            const taskListToggle = document.createElement('button');
+            taskListToggle.type = 'button';
+            taskListToggle.id = 'pbs-task-list-toggle';
+            taskListToggle.className = 'pbs-control';
+            taskListToggle.setAttribute('aria-controls', 'pbs-starred-panel');
+            taskListToggle.style.cssText = [
+                'border: 0',
+                'background: transparent',
+                'color: #9f1607',
+                'cursor: pointer',
+                'display: inline-flex',
+                'align-items: baseline',
+                'gap: 4px',
+                'min-height: 34px',
+                'padding: 0 4px',
+                'font: inherit',
+                'font-size: smaller',
+                'line-height: 1',
+                'white-space: nowrap'
+            ].join(';');
+            taskListToggle.addEventListener('click', () => {
+                writeTaskListCollapsed(!isTaskListCollapsed());
+                renderStarredTasks();
+            });
+            h2.appendChild(taskListToggle);
 
             const getParamUrl = () => buildParamUrl(createSlug(displayName), id, client);
 

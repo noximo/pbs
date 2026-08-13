@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.10
+// @version      0.3.11
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -197,7 +197,6 @@
     }
 
     const VISITED_TASKS_KEY = 'PBS_visited_tasks';
-    const TASK_LIST_COLLAPSED_KEY = 'PBS_task_list_collapsed';
     const CUSTOM_TASK_NAMES_KEY = 'PBS_custom_task_names';
 
     function writeStarredTasks(tasks) {
@@ -293,14 +292,6 @@
         updateTasks(readVisitedTasks, writeVisitedTasks);
     }
 
-    function isTaskListCollapsed() {
-        return safeGetStorageItem(TASK_LIST_COLLAPSED_KEY) === '1';
-    }
-
-    function writeTaskListCollapsed(collapsed) {
-        safeSetStorageItem(TASK_LIST_COLLAPSED_KEY, collapsed ? '1' : '0');
-    }
-
     function showPbsMessage(message, isError = false) {
         if (!document.body) return;
         let messageBox = document.getElementById('pbs-message');
@@ -366,6 +357,18 @@
         );
     }
 
+    function getClientBadgeColors(clientName) {
+        const hash = Array.from(clientName).reduce(
+            (value, character) => ((value << 5) - value + character.charCodeAt(0)) | 0,
+            0
+        );
+        const hue = Math.abs(hash) % 360;
+        return {
+            background: `hsl(${hue} 72% 92%)`,
+            color: `hsl(${hue} 56% 25%)`
+        };
+    }
+
     function ensureStarredTasksPanel() {
         let panel = document.getElementById('pbs-starred-panel');
         if (panel) return panel;
@@ -379,7 +382,7 @@
             'position: fixed',
             'inset-inline-start: 0',
             'inset-block-end: 0',
-            'z-index: 9999',
+            'z-index: 999',
             'width: 300px',
             'box-sizing: border-box',
             'background: #fff',
@@ -393,6 +396,7 @@
 
         const list = document.createElement('div');
         list.id = 'pbs-starred-list';
+        list.style.cssText = 'transition:transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); will-change:transform;';
         panel.appendChild(list);
 
         document.body.prepend(panel);
@@ -431,45 +435,11 @@
         return [...starredTasks, ...nonStarredVisited];
     }
 
-    function getInboxCounts(tasks = getInboxTasks()) {
-        return {
-            total: tasks.length,
-            unread: tasks.filter(task => task.hasNew && !task.completed).length
-        };
-    }
-
-    function updateTaskListToggle(tasks) {
-        const toggle = document.getElementById('pbs-task-list-toggle');
-        if (!toggle) return;
-
-        const { total, unread } = getInboxCounts(tasks);
-        const collapsed = isTaskListCollapsed();
-        toggle.replaceChildren();
-
-        const arrow = document.createElement('span');
-        arrow.textContent = collapsed ? '▸' : '▾';
-        arrow.setAttribute('aria-hidden', 'true');
-        toggle.appendChild(arrow);
-
-        if (unread) {
-            const unreadCount = document.createElement('strong');
-            unreadCount.textContent = `(${unread})`;
-            unreadCount.style.fontWeight = '700';
-            toggle.appendChild(unreadCount);
-        }
-
-        const totalCount = document.createElement('span');
-        totalCount.textContent = String(total);
-        toggle.appendChild(totalCount);
-        toggle.title = `${collapsed ? 'Zobrazit' : 'Skrýt'} úkoly${unread ? `, ${unread} nepřečtené` : ''}`;
-        toggle.setAttribute('aria-label', toggle.title);
-        toggle.setAttribute('aria-expanded', String(!collapsed));
-    }
-
     function setInboxPanelHeaderVisibility(panel, headerHeight, headerHidden) {
         panel.dataset.headerHidden = String(headerHidden);
-        panel.style.insetBlockStart = headerHidden ? '0px' : `${headerHeight}px`;
-        panel.style.paddingBlockStart = headerHidden ? `${headerHeight + 12}px` : '12px';
+        panel.style.insetBlockStart = '0px';
+        const list = panel.querySelector('#pbs-starred-list');
+        if (list) list.style.transform = `translateY(${headerHidden ? 0 : headerHeight}px)`;
     }
 
     function positionInboxPanel(panel) {
@@ -482,12 +452,9 @@
         const panel = ensureStarredTasksPanel();
         const list = panel.querySelector('#pbs-starred-list');
         const tasks = getInboxTasks();
-        const collapsed = isTaskListCollapsed();
 
-        panel.hidden = collapsed;
         positionInboxPanel(panel);
-        updateTaskListToggle(tasks);
-        if (collapsed || !list) return;
+        if (!list) return;
 
         list.replaceChildren();
         if (tasks.length === 0) {
@@ -550,7 +517,6 @@
                 row.appendChild(titleLine);
 
                 const meta = document.createElement('div');
-                const clientText = task.client ? `${task.client} · ` : '';
                 const timeText = task.lastPostTime ? formatRelativeTime(task.lastPostTime) : 'Bez komentářů';
                 const statusText = isCompleted ? '✓ Ukončený · ' : '';
                 const timeTotal = task.approvedTimeMinutes ? formatMinutesToHours(task.approvedTimeMinutes) : '';
@@ -564,12 +530,11 @@
                 const errorText = checkError ? ' · kontrola selhala' : '';
                 link.title = displayName;
                 const leftText = document.createElement('span');
-                leftText.textContent = `${clientText}${statusText}${timeText}${authorText}${checkingText}${errorText}`;
+                leftText.textContent = `${statusText}${timeText}${authorText}${checkingText}${errorText}`;
                 if (checkError) {
                     leftText.title = checkError;
                     leftText.style.color = '#9f1607';
                 }
-                meta.appendChild(leftText);
                 meta.style.cssText = [
                     'color: #666',
                     'font-size: 11px',
@@ -579,6 +544,29 @@
                     'box-sizing: border-box',
                     'padding-inline-start: 19px'
                 ].join(';');
+                if (task.client) {
+                    const clientBadge = document.createElement('span');
+                    const colors = getClientBadgeColors(task.client);
+                    clientBadge.textContent = task.client;
+                    clientBadge.style.cssText = [
+                        'display: inline-flex',
+                        'align-items: center',
+                        'max-width: 110px',
+                        'overflow: hidden',
+                        'text-overflow: ellipsis',
+                        'white-space: nowrap',
+                        'padding: 1px 5px',
+                        'border-radius: 999px',
+                        `background: ${colors.background}`,
+                        `color: ${colors.color}`,
+                        'font-size: 10px',
+                        'font-weight: 700',
+                        'line-height: 1.3'
+                    ].join(';');
+                    clientBadge.title = task.client;
+                    meta.appendChild(clientBadge);
+                }
+                meta.appendChild(leftText);
                 if (task.lastPostTime) {
                     meta.title = formatTimestamp(task.lastPostTime);
                 }
@@ -1227,32 +1215,6 @@
             taskMeta.style.cssText = 'font-size:smaller;white-space:nowrap;flex:0 0 auto;line-height:34px;';
             taskMeta.textContent = `${client} #${id}`;
             h2.appendChild(taskMeta);
-
-            const taskListToggle = document.createElement('button');
-            taskListToggle.type = 'button';
-            taskListToggle.id = 'pbs-task-list-toggle';
-            taskListToggle.className = 'pbs-control';
-            taskListToggle.setAttribute('aria-controls', 'pbs-starred-panel');
-            taskListToggle.style.cssText = [
-                'border: 0',
-                'background: transparent',
-                'color: #9f1607',
-                'cursor: pointer',
-                'display: inline-flex',
-                'align-items: baseline',
-                'gap: 4px',
-                'min-height: 34px',
-                'padding: 0 4px',
-                'font: inherit',
-                'font-size: smaller',
-                'line-height: 1',
-                'white-space: nowrap'
-            ].join(';');
-            taskListToggle.addEventListener('click', () => {
-                writeTaskListCollapsed(!isTaskListCollapsed());
-                renderStarredTasks();
-            });
-            h2.appendChild(taskListToggle);
 
             const getParamUrl = () => buildParamUrl(createSlug(displayName), id, client);
 

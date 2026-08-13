@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.9
+// @version      0.3.10
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -388,8 +388,7 @@
             'text-align: left',
             'line-height: 1.5em',
             'font-size: 13px',
-            'overflow: auto',
-            'transition: inset-block-start 0.3s ease-in-out'
+            'overflow: auto'
         ].join(';');
 
         const list = document.createElement('div');
@@ -467,10 +466,16 @@
         toggle.setAttribute('aria-expanded', String(!collapsed));
     }
 
+    function setInboxPanelHeaderVisibility(panel, headerHeight, headerHidden) {
+        panel.dataset.headerHidden = String(headerHidden);
+        panel.style.insetBlockStart = headerHidden ? '0px' : `${headerHeight}px`;
+        panel.style.paddingBlockStart = headerHidden ? `${headerHeight + 12}px` : '12px';
+    }
+
     function positionInboxPanel(panel) {
         const siteHeader = document.querySelector('#head, header, .Navigation');
         const headerHeight = Math.ceil(siteHeader?.getBoundingClientRect().height || 64);
-        panel.style.insetBlockStart = `${headerHeight}px`;
+        setInboxPanelHeaderVisibility(panel, headerHeight, panel.dataset.headerHidden === 'true');
     }
 
     function renderStarredTasks() {
@@ -1777,7 +1782,7 @@
                 head.style.transform = headerHidden ? 'translateY(-100%)' : 'translateY(0)';
                 const inboxPanel = document.getElementById('pbs-starred-panel');
                 if (inboxPanel) {
-                    inboxPanel.style.insetBlockStart = headerHidden ? '0px' : `${head.offsetHeight}px`;
+                    setInboxPanelHeaderVisibility(inboxPanel, head.offsetHeight, headerHidden);
                 }
                 lastScrollTop = Math.max(0, currentScroll);
                 scrollFrame = null;

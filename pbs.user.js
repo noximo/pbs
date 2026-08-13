@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.17
+// @version      0.3.18
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -126,9 +126,49 @@
         }) || null;
     }
 
+    function findExtendedTaskDetailForm(doc = document) {
+        const form = doc.querySelector('form#editTaskForm, form[name="editForm"]');
+        if (!form) return null;
+
+        const labels = Array.from(form.querySelectorAll('label')).map(label => normalizeText(label.textContent));
+        return labels.some(label => label === 'ID úkolu:')
+            && labels.some(label => label === 'Název:')
+            ? form
+            : null;
+    }
+
+    function getExtendedTaskField(form, labelText) {
+        const label = Array.from(form.querySelectorAll('label')).find(
+            candidate => normalizeText(candidate.textContent) === labelText
+        );
+        return label?.nextElementSibling || null;
+    }
+
+    function extractExtendedTaskData(form) {
+        const idField = getExtendedTaskField(form, 'ID úkolu:');
+        const nameField = getExtendedTaskField(form, 'Název:');
+        const clientField = getExtendedTaskField(form, 'Zákazník:');
+        const statusField = getExtendedTaskField(form, 'Status:');
+        const status = normalizeText(statusField?.textContent);
+
+        return {
+            name: normalizeText(nameField?.textContent),
+            id: normalizeText(idField?.textContent),
+            client: normalizeText(clientField?.querySelector(':scope > strong')?.textContent || clientField?.textContent),
+            status,
+            completed: status.toLocaleLowerCase('cs').includes('ukončený')
+        };
+    }
+
     function extractTableData(doc = document, hideTable = true) {
         const table = findTaskDetailTable(doc);
-        if (!table) return null;
+        if (!table) {
+            const form = findExtendedTaskDetailForm(doc);
+            if (!form) return null;
+
+            const data = extractExtendedTaskData(form);
+            return data.name && data.id ? data : null;
+        }
 
         const data = { name: '', id: '', client: '', status: '', completed: false };
         const rows = table.querySelectorAll('tbody tr');

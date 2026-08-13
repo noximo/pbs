@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.15
+// @version      0.3.16
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -422,15 +422,20 @@
             'position: fixed',
             'z-index: 1001',
             'box-sizing: border-box',
-            'max-width: min(360px, calc(100vw - 24px))',
+            'width: min(380px, calc(100vw - 24px))',
+            'max-height: min(70vh, 560px)',
+            'overflow-y: auto',
             'padding: 10px 12px',
             'background: #fff',
             'border: 1px solid #d8d8d8',
             'border-radius: 8px',
             'box-shadow: 0 8px 24px rgba(0,0,0,0.16)',
             'color: #333',
-            'font-size: 12px',
-            'line-height: 1.45',
+            'font-size: 13px',
+            'line-height: 1.5',
+            'white-space: pre-wrap',
+            'overflow-wrap: anywhere',
+            'text-align: start',
             'pointer-events: none',
             'opacity: 0',
             'visibility: hidden',
@@ -615,8 +620,7 @@
                 const timeText = task.lastPostTime ? formatRelativeTime(task.lastPostTime) : 'Bez komentářů';
                 const timeTotal = task.approvedTimeMinutes ? formatMinutesToHours(task.approvedTimeMinutes) : '';
                 const authorText = task.lastPostAuthor ? ` · ${task.lastPostAuthor}` : '';
-                const cleanText = task.lastPostText ? task.lastPostText.replace(/\s+/g, ' ').trim() : '';
-                const previewText = cleanText;
+                const previewText = task.lastPostText?.trim() || '';
                 const taskId = String(task.id || '');
                 const checkingText = taskId && checkingTaskIds.has(taskId) ? ' · kontroluji…' : '';
                 const checkError = taskCheckErrors.get(taskId);
@@ -945,10 +949,8 @@
         return `${hours}:${String(minutes).padStart(2, '0')}`;
     }
 
-    function trimText(text, maxLength) {
-        if (!text) return '';
-        if (text.length <= maxLength) return text;
-        return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+    function trimText(text) {
+        return (text || '').trim();
     }
 
     function updateStarredTaskById(id, updater) {

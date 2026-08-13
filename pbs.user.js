@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.8
+// @version      0.3.9
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -388,7 +388,8 @@
             'text-align: left',
             'line-height: 1.5em',
             'font-size: 13px',
-            'overflow: auto'
+            'overflow: auto',
+            'transition: inset-block-start 0.3s ease-in-out'
         ].join(';');
 
         const list = document.createElement('div');
@@ -1772,7 +1773,12 @@
             if (scrollFrame !== null) return;
             scrollFrame = window.requestAnimationFrame(() => {
                 const currentScroll = window.pageYOffset || document.documentElement.scrollTop;
-                head.style.transform = currentScroll > lastScrollTop ? 'translateY(-100%)' : 'translateY(0)';
+                const headerHidden = currentScroll > lastScrollTop;
+                head.style.transform = headerHidden ? 'translateY(-100%)' : 'translateY(0)';
+                const inboxPanel = document.getElementById('pbs-starred-panel');
+                if (inboxPanel) {
+                    inboxPanel.style.insetBlockStart = headerHidden ? '0px' : `${head.offsetHeight}px`;
+                }
                 lastScrollTop = Math.max(0, currentScroll);
                 scrollFrame = null;
             });

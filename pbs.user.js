@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.11
+// @version      0.3.12
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -518,7 +518,6 @@
 
                 const meta = document.createElement('div');
                 const timeText = task.lastPostTime ? formatRelativeTime(task.lastPostTime) : 'Bez komentářů';
-                const statusText = isCompleted ? '✓ Ukončený · ' : '';
                 const timeTotal = task.approvedTimeMinutes ? formatMinutesToHours(task.approvedTimeMinutes) : '';
                 const authorText = task.lastPostAuthor ? ` · ${task.lastPostAuthor}` : '';
                 const cleanText = task.lastPostText ? task.lastPostText.replace(/\s+/g, ' ').trim() : '';
@@ -530,7 +529,7 @@
                 const errorText = checkError ? ' · kontrola selhala' : '';
                 link.title = displayName;
                 const leftText = document.createElement('span');
-                leftText.textContent = `${statusText}${timeText}${authorText}${checkingText}${errorText}`;
+                leftText.textContent = `${timeText}${authorText}${checkingText}${errorText}`;
                 if (checkError) {
                     leftText.title = checkError;
                     leftText.style.color = '#9f1607';

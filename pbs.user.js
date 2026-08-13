@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.13
+// @version      0.3.14
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -786,6 +786,58 @@
         return totalMinutes;
     }
 
+    function getStatementRequestData(doc) {
+        const taskElement = doc.querySelector('#pb-tasks');
+        const taskId = taskElement?.dataset.taskId?.trim() || '';
+        const workerId = taskElement?.dataset.workerId?.trim() || '';
+        return /^\d+$/.test(taskId) && /^\d+$/.test(workerId) ? { taskId, workerId } : null;
+    }
+
+    async function getAjaxStatementTimeFromDocument(doc, signal) {
+        const requestData = getStatementRequestData(doc);
+        if (!requestData) return 0;
+
+        const url = new URL('/ajax.php', window.location.origin);
+        url.searchParams.set('action', 'statement');
+        url.searchParams.set('type', 'mine');
+        url.searchParams.set('task_id', requestData.taskId);
+        url.searchParams.set('worker_id', requestData.workerId);
+
+        const response = await fetch(url, {
+            credentials: 'same-origin',
+            signal
+        });
+        if (!response.ok) {
+            throw new Error(`Výkaz času se nepodařilo načíst, server odpověděl stavem ${response.status}.`);
+        }
+
+        const xml = new DOMParser().parseFromString(await response.text(), 'application/xml');
+        if (xml.querySelector('parsererror')) {
+            throw new Error('Výkaz času má neplatný formát XML.');
+        }
+
+        const statementIds = new Set();
+        let totalMinutes = 0;
+        xml.querySelectorAll('statement').forEach(statement => {
+            const statementId = statement.getAttribute('id') || '';
+            if (!statementId || statementIds.has(statementId)) return;
+
+            const capacity = Number.parseFloat(statement.getAttribute('capacity_raw') || '');
+            if (!Number.isFinite(capacity) || capacity <= 0) return;
+
+            statementIds.add(statementId);
+            totalMinutes += Math.round(capacity * 60);
+        });
+
+        return totalMinutes;
+    }
+
+    async function getTotalApprovedTimeFromDocument(doc, signal) {
+        const inlineMinutes = getApprovedUniqueTimeFromDocument(doc);
+        const ajaxMinutes = await getAjaxStatementTimeFromDocument(doc, signal);
+        return inlineMinutes + ajaxMinutes;
+    }
+
     function getLastPostInfoFromDocument(doc) {
         let latest = null;
 
@@ -976,7 +1028,7 @@
                 const lastLog = latestInfo
                     ? `${latestInfo.author} @ ${formatTimestamp(latestInfo.time)}`
                     : 'no posts';
-                const approvedMinutes = getApprovedUniqueTimeFromDocument(doc);
+                const approvedMinutes = await getTotalApprovedTimeFromDocument(doc, controller.signal);
                 const starredUpdate = updateStarredTaskById(taskId, currentTask => {
                     if (latestInfo) {
                         currentTask.lastPostTime = latestInfo.time;
@@ -1025,7 +1077,7 @@
         renderStarredTasks();
     }
 
-    function updateCurrentTaskFromPage(taskMeta) {
+    async function updateCurrentTaskFromPage(taskMeta) {
         if (!taskMeta?.id || !taskMeta?.url) return;
         const taskId = taskMeta.id;
         const now = Date.now();
@@ -1041,7 +1093,17 @@
             }
         }
 
-        const approvedMinutes = getApprovedUniqueTimeFromDocument(document);
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), TASK_CHECK_TIMEOUT_MS);
+        let approvedMinutes;
+        try {
+            approvedMinutes = await getTotalApprovedTimeFromDocument(document, controller.signal);
+        } catch (error) {
+            console.warn('PBS: načtení výkazu času selhalo', error);
+            approvedMinutes = getApprovedUniqueTimeFromDocument(document);
+        } finally {
+            window.clearTimeout(timeoutId);
+        }
         if (match) {
             match.approvedTimeMinutes = approvedMinutes;
             match.completed = Boolean(taskMeta.completed);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.12
+// @version      0.3.13
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -340,6 +340,22 @@
                 outline-offset: 2px;
                 border-radius: 2px;
             }
+            #pbs-starred-panel {
+                scrollbar-width: thin;
+                scrollbar-color: rgba(0, 0, 0, 0.28) transparent;
+            }
+            #pbs-starred-panel::-webkit-scrollbar {
+                width: 8px;
+            }
+            #pbs-starred-panel::-webkit-scrollbar-thumb {
+                background: rgba(0, 0, 0, 0.24);
+                border: 2px solid transparent;
+                border-radius: 999px;
+                background-clip: content-box;
+            }
+            #pbs-starred-panel::-webkit-scrollbar-thumb:hover {
+                background-color: rgba(0, 0, 0, 0.4);
+            }
             @media (max-width: 760px) {
                 #pbs-starred-panel {
                     width: 100vw !important;
@@ -367,6 +383,59 @@
             background: `hsl(${hue} 72% 92%)`,
             color: `hsl(${hue} 56% 25%)`
         };
+    }
+
+    function ensureTaskPreviewTooltip() {
+        let tooltip = document.getElementById('pbs-task-preview-tooltip');
+        if (tooltip) return tooltip;
+
+        tooltip = document.createElement('div');
+        tooltip.id = 'pbs-task-preview-tooltip';
+        tooltip.setAttribute('role', 'tooltip');
+        tooltip.style.cssText = [
+            'position: fixed',
+            'z-index: 1001',
+            'box-sizing: border-box',
+            'max-width: min(360px, calc(100vw - 24px))',
+            'padding: 10px 12px',
+            'background: #fff',
+            'border: 1px solid #d8d8d8',
+            'border-radius: 8px',
+            'box-shadow: 0 8px 24px rgba(0,0,0,0.16)',
+            'color: #333',
+            'font-size: 12px',
+            'line-height: 1.45',
+            'pointer-events: none',
+            'opacity: 0',
+            'visibility: hidden',
+            'transition: opacity 0.15s ease-out'
+        ].join(';');
+        document.body.appendChild(tooltip);
+        return tooltip;
+    }
+
+    function showTaskPreviewTooltip(target, text) {
+        if (!text) return;
+        const tooltip = ensureTaskPreviewTooltip();
+        const targetRect = target.getBoundingClientRect();
+        const gap = 12;
+        const preferredLeft = targetRect.right + gap;
+        const canOpenRight = preferredLeft + 220 <= window.innerWidth;
+        tooltip.textContent = text;
+        tooltip.style.left = `${canOpenRight ? preferredLeft : 12}px`;
+        tooltip.style.top = '12px';
+        tooltip.style.visibility = 'visible';
+        tooltip.style.opacity = '1';
+        const maxTop = window.innerHeight - tooltip.offsetHeight - 12;
+        const preferredTop = canOpenRight ? targetRect.top : targetRect.bottom + gap;
+        tooltip.style.top = `${Math.max(12, Math.min(preferredTop, maxTop))}px`;
+    }
+
+    function hideTaskPreviewTooltip() {
+        const tooltip = document.getElementById('pbs-task-preview-tooltip');
+        if (!tooltip) return;
+        tooltip.style.opacity = '0';
+        tooltip.style.visibility = 'hidden';
     }
 
     function ensureStarredTasksPanel() {
@@ -521,8 +590,7 @@
                 const timeTotal = task.approvedTimeMinutes ? formatMinutesToHours(task.approvedTimeMinutes) : '';
                 const authorText = task.lastPostAuthor ? ` · ${task.lastPostAuthor}` : '';
                 const cleanText = task.lastPostText ? task.lastPostText.replace(/\s+/g, ' ').trim() : '';
-                const previewLimit = 240;
-                const previewText = cleanText ? cleanText.slice(0, previewLimit) : '';
+                const previewText = cleanText;
                 const taskId = String(task.id || '');
                 const checkingText = taskId && checkingTaskIds.has(taskId) ? ' · kontroluji…' : '';
                 const checkError = taskCheckErrors.get(taskId);
@@ -580,32 +648,10 @@
                 row.appendChild(meta);
 
                 if (previewText) {
-                    const textLine = document.createElement('div');
-                    textLine.textContent = previewText;
-                    textLine.style.cssText = [
-                        'font-size: 11px',
-                        'color: #888',
-                        'overflow: hidden',
-                        'white-space: normal',
-                        'line-height: 1.2',
-                        'box-sizing: border-box',
-                        'padding-inline-start: 19px',
-                        task.hasNew ? 'max-height: 1.2em' : 'max-height: 0',
-                        task.hasNew ? 'opacity: 1' : 'opacity: 0',
-                        task.hasNew ? 'margin-top: 0' : 'margin-top: 0',
-                        'transition: opacity 0.15s ease-out'
-                    ].join(';');
-                    row.appendChild(textLine);
-
-                    row.addEventListener('mouseenter', () => {
-                        textLine.style.maxHeight = '7.2em';
-                        textLine.style.opacity = '1';
-                    });
-
-                    row.addEventListener('mouseleave', () => {
-                        textLine.style.maxHeight = task.hasNew ? '1.2em' : '0';
-                        textLine.style.opacity = task.hasNew ? '1' : '0';
-                    });
+                    row.addEventListener('mouseenter', () => showTaskPreviewTooltip(row, previewText));
+                    row.addEventListener('mouseleave', hideTaskPreviewTooltip);
+                    link.addEventListener('focus', () => showTaskPreviewTooltip(row, previewText));
+                    link.addEventListener('blur', hideTaskPreviewTooltip);
                 }
 
                 row.addEventListener('click', (event) => {

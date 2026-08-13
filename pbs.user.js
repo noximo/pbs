@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.16
+// @version      0.3.17
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -868,6 +868,18 @@
         return inlineMinutes + ajaxMinutes;
     }
 
+    function getCommentTextWithLineBreaks(content) {
+        const fragment = content.cloneNode(true);
+        fragment.querySelectorAll('br').forEach(lineBreak => lineBreak.replaceWith('\n'));
+        fragment.querySelectorAll('p, div, li, blockquote, pre, h1, h2, h3, h4, h5, h6').forEach(block => {
+            block.append('\n');
+        });
+        return fragment.textContent
+            .replace(/\r\n?/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
     function getLastPostInfoFromDocument(doc) {
         let latest = null;
 
@@ -883,7 +895,7 @@
 
             if (!latest || date.getTime() > latest.time) {
                 const author = comment.querySelector('.post-author')?.textContent.trim() || '';
-                const text = content.textContent.trim();
+                const text = getCommentTextWithLineBreaks(content);
                 latest = {
                     time: date.getTime(),
                     author,

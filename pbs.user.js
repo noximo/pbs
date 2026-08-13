@@ -1510,6 +1510,31 @@
         if (disw) disw.style.marginTop = 0;
     }
 
+    function setupEditFormToggle() {
+        const form = document.getElementById('editTaskForm');
+        if (!form || document.getElementById('pbs-edit-form-toggle')) return;
+
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.id = 'pbs-edit-form-toggle';
+        toggle.className = 'grbut but-small u-mt--20';
+        toggle.setAttribute('aria-controls', form.id);
+        toggle.setAttribute('aria-expanded', 'false');
+
+        const updateToggle = (isOpen) => {
+            form.hidden = !isOpen;
+            toggle.textContent = isOpen ? 'Skrýt editaci' : 'Zobrazit editaci';
+            toggle.setAttribute('aria-expanded', String(isOpen));
+        };
+
+        toggle.addEventListener('click', () => {
+            updateToggle(form.hidden);
+        });
+
+        form.insertAdjacentElement('beforebegin', toggle);
+        updateToggle(false);
+    }
+
     function getSafeUrl(value) {
         if (!value) return '';
         try {
@@ -1977,6 +2002,7 @@
         setupHeader(data.name, data.id, data.client);
 
         cleanupElements();
+        setupEditFormToggle();
         handleDescriptionContent();
         reorganizeDOM();
         updateUrlParams(nameSlug, data.client, data.id);

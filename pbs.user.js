@@ -1593,9 +1593,7 @@
             const textareaValue = descriptionTextarea?.value.trim();
 
             if (textareaValue) {
-                const div = document.createElement('div');
-                div.textContent = textareaValue;
-                descContent = div.innerHTML.replace(/\n/g, '<br>');
+                descContent = textareaValue.replace(/\n/g, '<br>');
             }
         }
 

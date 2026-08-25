@@ -1588,6 +1588,17 @@
             }
         }
 
+        if (!descContent) {
+            const descriptionTextarea = document.getElementById('f_description_f');
+            const textareaValue = descriptionTextarea?.value.trim();
+
+            if (textareaValue) {
+                const div = document.createElement('div');
+                div.textContent = textareaValue;
+                descContent = div.innerHTML.replace(/\n/g, '<br>');
+            }
+        }
+
         descContent = descContent.replace('<base target="_blank">', '');
 
         const descTabs = document.getElementById('desc-tabs');

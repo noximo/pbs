@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PBS
 // @namespace    https://github.com/noximo/pbs
-// @version      0.3.18
+// @version      0.3.19
 // @description  Add project name as query param and redirect
 // @match        https://pbs2.praguebest.cz/*
 // @updateURL    https://raw.githubusercontent.com/noximo/pbs/main/pbs.user.js
@@ -39,10 +39,17 @@
     }
 
     function isSystemCommentContent(content) {
-        const text = normalizeText(
-            typeof content === 'string' ? content.replace(/<[^>]*>/g, ' ') : content?.textContent
+        if (typeof content === 'string') {
+            const element = document.createElement('div');
+            element.innerHTML = content;
+            content = element;
+        }
+        if (!content || content.querySelector('img, video, audio, iframe, object, embed')) return false;
+
+        const lines = getCommentTextWithLineBreaks(content).split('\n').map(normalizeText).filter(Boolean);
+        return lines.length > 0 && lines.every(line =>
+            systemCommentPatterns.some(pattern => pattern.test(line))
         );
-        return systemCommentPatterns.some(pattern => pattern.test(text));
     }
 
     function checkPostRequest() {
